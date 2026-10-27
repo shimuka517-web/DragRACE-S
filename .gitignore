@@ -10,4 +10,4 @@ logs/
 
 # ---- Pythonが自動で作るファイル ----
 __pycache__/
-*.pyc
+*.pycmaps/

@@ -1,0 +1,33 @@
+# DragRACE-S 用 ROS 2 部屋の起動設定
+# 使い方は docker/README.md を参照
+
+services:
+  ros:
+    build: .
+    image: dragrace-s-ros:jazzy
+    container_name: dragrace-s-ros
+
+    # ラズパイ本体と同じネットワークを使う
+    # （DragRACE やノートパソコンの ROS 2 とやり取りしやすくするため）
+    network_mode: host
+    ipc: host
+
+    # 部屋の中から LiDAR（USB）や IMU（I2C）を使えるようにする
+    # 機器を後から抜き差ししても使えるよう、/dev をまるごと渡している
+    privileged: true
+    volumes:
+      - /dev:/dev
+      # リポジトリ全体を部屋の /workspace に見せる（ノード開発用）
+      - ../:/workspace
+      # 地図の保存先（Git には含めない）
+      - ../maps:/maps
+
+    environment:
+      # 同じネットワークにある別の ROS 2 と混ざらないようにする番号
+      # ノートパソコンで地図を見るときは、そちらも同じ番号にする
+      - ROS_DOMAIN_ID=30
+
+    # 起動したまま待機させ、必要なときに中に入って作業する
+    command: sleep infinity
+    stdin_open: true
+    tty: true
