@@ -47,7 +47,7 @@ docker compose down
 部屋の中で：
 
 ```bash
-ros2 pkg list | grep -E "sllidar|slam_toolbox|cartographer"
+ros2 pkg list | grep -E "ldlidar|slam_toolbox|cartographer"
 ```
 
 3種類のパッケージ名が表示されれば準備完了です。

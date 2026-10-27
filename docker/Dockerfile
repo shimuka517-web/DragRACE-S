@@ -20,9 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-smbus \
     && rm -rf /var/lib/apt/lists/*
 
-# RPLIDAR C1 のドライバー（SLAMTEC 公式の sllidar_ros2）をソースからビルド
+# LD19 のドライバー（LDROBOT 公式の ldlidar_stl_ros2）をソースからビルド
 WORKDIR /ros2_ws/src
-RUN git clone --depth 1 https://github.com/Slamtec/sllidar_ros2.git
+RUN git clone --depth 1 https://github.com/ldrobotSensorTeam/ldlidar_stl_ros2.git
 WORKDIR /ros2_ws
 RUN . /opt/ros/jazzy/setup.sh && colcon build --symlink-install
 
