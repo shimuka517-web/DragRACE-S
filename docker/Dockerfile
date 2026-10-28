@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # LD19 のドライバー（LDROBOT 公式の ldlidar_stl_ros2）をソースからビルド
 WORKDIR /ros2_ws/src
 RUN git clone --depth 1 https://github.com/ldrobotSensorTeam/ldlidar_stl_ros2.git
+# 新しいコンパイラでは pthread.h が自動で読み込まれずビルドに失敗するため、先頭に追加する
+RUN sed -i '1i #include <pthread.h>' ldlidar_stl_ros2/ldlidar_driver/src/logger/log_module.cpp
 WORKDIR /ros2_ws
 RUN . /opt/ros/jazzy/setup.sh && colcon build --symlink-install
 
