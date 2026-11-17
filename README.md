@@ -11,6 +11,8 @@
 | `camera_test.py` | カメラの確認・調整 |
 | `servo_test.py` | ステアリングの中立出し・切れ角確認 |
 | `throttle_test.py` | スロットル（ESC）の学習 |
+| `pp_test.py` | ピュアパシュート（ハンドルの新方式）のキャリブレーションと確認。モーターは動かさない |
+| `line_algo.py` | ピュアパシュートの部品（rc_race.py と pp_test.py が使う） |
 | `kyotsu_settei.json` | 共通設定（全車共通・教員が管理） |
 | `kuruma_settei_sample.json` | 車ごとの設定の見本 |
 | `docs/` | 説明書・調整マニュアル |

@@ -49,6 +49,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import cv2
 
+try:
+    import line_algo      # 新方式（ピュアパシュート）の部品。無くても今の方式だけで走れる
+except Exception as _e:
+    line_algo = None
+    print(f"[設定] line_algo.py が読めません ({_e}) — 今の方式だけで動きます")
+
 # ==============================================================================
 # ブロック1: 設定
 #   ★印 … 授業で調整することがあるもの（教員の指示に従うこと）
@@ -311,6 +317,42 @@ HANDORU_GYAKU = False # ハンドルの向き（個別設定項目）。ライ�
 STEER_HOJI_HIROGARI = 0.35  # ラインの色が横方向に画面のこの割合以上広がったら、
                             # ハンドルを直前の値のまま保持する。
                             # ゴールライン進入時に計算が狂って誤操舵するのを防ぐガード
+
+# ------------------------------------------------------------------------------
+# ハンドルの方式の切り替え（今の方式 ⇔ ピュアパシュート）
+#   仕組みは line_algo.py、選んだ理由は docs/LINETRACE_EVAL.md、
+#   使い方は docs/説明書_pp_test.md を読むこと。
+#   ピュアパシュートを使うには、先に pp_test.py でキャリブレーションが必要。
+# ------------------------------------------------------------------------------
+LINE_ALGO = "pd"      # ★ ハンドルの方式。"pd"＝今の方式（近くの帯のズレに P・D）
+                      #   "pp"＝ピュアパシュート（少し先の目標点へ円を描いて向かう）
+                      #   画面のボタンでも切り替えられる（kuruma_settei.json に保存される）。
+                      #   "pp" でも、目標点が決まらないコマは自動で今の方式に戻る
+PP_MIRUDAKE = True    # 今の方式で走っているときも、ピュアパシュートの計算だけはして
+                      # 画面と走行記録に残す（見比べ用）。重いと感じたら False
+PP_LD_KIHON = 0.45    # ★ 先読み距離[m]の基本。後輪の車軸からこの距離にあるライン上の点を狙う
+                      #   大きくする → ハンドルがなめらか。細かい蛇行をなぞらず、ならして走る。
+                      #                ただしカーブの内側を通りやすくなる（インカット）
+                      #   小さくする → ラインに忠実。ただしふらつきやすい
+PP_LD_SOKUDO = 0.25   # ★ 速度 1 m/s につき先読み距離を何m伸ばすか。速いほど遠くを見る
+PP_LD_SAISHO = 0.30   # 先読み距離の下限[m]
+PP_SOKUDO_KEISU = 0.0 # ★ アクセル 1% あたりの速度[m/s]（速度の見積もり用。センサーが無いため）
+                      #   0 のままなら速度は 0 とみなし、先読み距離は PP_LD_KIHON で固定。
+                      #   例: アクセル 20% で約 2 m/s 出る車なら 0.1
+KIREKAKU_DO = 25.0    # ★ ハンドル 1.00（左右いっぱい）のときの、タイヤの実際の切れ角[°]
+                      #   servo_test の「任意の信号を出す」と分度器で測って入れる。
+                      #   実際より大きい値を入れる → 切り足りずカーブで外にふくらむ
+                      #   実際より小さい値を入れる → 切りすぎてふらつく
+WHEELBASE = 0.257     # 前輪と後輪の車軸の間の距離[m]（TT-02 は 0.257）
+PP_CURVE_GEN = 0.0    # ★ カーブでアクセルを緩める強さ。0＝緩めない
+                      #   アクセル = もとの値 × (1 − この値 × カーブのきつさ[1/m])
+                      #   カーブのきつさは 1÷半径[m]。例: 0.2 なら半径 1m のカーブで 2割減
+PP_CURVE_SAITEI = 0.5 # カーブで緩めても、もとのアクセルのこの割合より下げない
+PP_GATE = 0.25        # 点群をたどるとき「ラインの続き」とみなす距離[m]
+                      #   大きくする → 急な角も追えるが、近くの別の物に飛び移りやすい
+PP_HENKAN = None      # 画素 ⇔ 床の位置 の変換（pp_test.py のキャリブレーションで保存される）
+PP_HENKAN_SIZE = None # その変換を作ったときの画像の大きさ
+PP_SHIKAKU = None     # キャリブレーションに使った四角形の寸法（pp_test.py が表示に使う）
 
 # ------------------------------------------------------------------------------
 # スロットルの向きとブレーキ
@@ -616,15 +658,27 @@ def nou_de_handan(app, kekka, ima):
                 sabun = kekka["zure"] - app.zure_zenkai
             app.zure_zenkai = kekka["zure"]
             sa = -(STEER_P_GAIN * kekka["nerai"] + STEER_D_GAIN * sabun) * muki
-            app.steer_sa = max(-KIREKAKU_HABA, min(KIREKAKU_HABA, sa))
+            app.steer_pd = max(-KIREKAKU_HABA, min(KIREKAKU_HABA, sa))
         else:
             # ライン無し・保持中は差分の記憶を捨てる
             # （欠測をまたいで差分を取ると巨大なD値が出てハンドルが跳ねるため）
             app.zure_zenkai = None
-        # (ハンドル自体は app.steer_sa を保持 = 前回の値のまま)
+        # (ハンドル自体は app.steer_pd を保持 = 前回の値のまま)
+
+        # --- 方式の切り替え ---
+        # ピュアパシュートの結果（kekka["pp"]）があれば、ハンドルの量[%]に直しておく。
+        # LINE_ALGO="pp" で目標点が決まったコマはそれを使い、それ以外は上の今の方式を使う
+        pp = kekka.get("pp")
+        app.steer_pp = None
+        if pp and pp.get("ok"):
+            app.steer_pp = pp["sa"] * KIREKAKU_HABA * (-1 if HANDORU_GYAKU else 1)
+        app.pp_chu = LINE_ALGO == "pp" and app.steer_pp is not None
+        app.steer_sa = app.steer_pp if app.pp_chu else app.steer_pd
 
         # --- アクセル: 発進プロファイル（発進%からランプで踏み増す） ---
         kihon = min(ACCEL_SAIDAI, ACCEL_HASSHIN + ACCEL_RAMPU * keika)
+        if app.pp_chu:
+            kihon *= pp.get("gen", 1.0)   # ピュアパシュート: カーブの手前で緩める（PP_CURVE_GEN）
 
         # --- アクセルワーク: ハンドルの切り増し・切り戻しでアクセルを抜く・踏む ---
         mashi, modoshi = kirikata(sa_mae, app.steer_sa)
@@ -665,7 +719,8 @@ def nou_de_handan(app, kekka, ima):
             app.goal_kaisu = 0
 
         # ライン切断はバックアップ停止（マーカー見逃し・コースアウト時）
-        if not kekka["line_mieru"]:
+        # （ピュアパシュートで目標点が見えている間は、近くの帯に無くても見失いとしない）
+        if not (kekka["line_mieru"] or app.pp_chu):
             if app.rosuto_kaisu == 0:
                 app.rosuto_hajime = keika
             app.rosuto_kaisu += 1
@@ -1148,6 +1203,16 @@ class RaceApp:
         self.accel_gen = 0.0         # アクセルワークで下げている量[%]
         self.accel_jikoku = None     # アクセルワークの前回計算時刻
         self.steer_sa = 0.0
+        self.steer_pd = 0.0          # 今の方式で計算したハンドル[%]
+        self.steer_pp = None         # ピュアパシュートで計算したハンドル[%]（計算できないコマは None）
+        self.pp_chu = False          # いまピュアパシュートのハンドルで走っているか
+        self.pp = None               # ピュアパシュートの計算係（line_algo.py）
+        if line_algo is not None:
+            self.pp = line_algo.PurePursuit(line_algo.settei_toridasu(globals()))
+            if self.pp.tsukaeru:
+                print(f"[方式] ピュアパシュート使用可（キャリブレーション済み）。いまの方式: {LINE_ALGO}")
+            elif LINE_ALGO == "pp":
+                print("[方式] LINE_ALGO は pp ですが、キャリブレーションがまだです（pp_test.py）。今の方式で走ります")
         self.saigo_tsushin = None    # 最後にブラウザから通信があった時刻
 
         self.midori_kaisu = 0
@@ -1175,6 +1240,7 @@ class RaceApp:
             self.state = "ARMED"
             self.midori_kaisu = 0
             self.steer_sa = 0.0
+            self.steer_pd = 0.0
             self.line_ato = None      # 追跡をリセット（中央から探し直す）
             self.zure_zenkai = None   # D項の差分もリセット
             print("[ボタン] ARM: 緑シグナル待ち")
@@ -1192,6 +1258,22 @@ class RaceApp:
             if mae != "IDLE":
                 print(f"[ボタン] STOP: {mae} → IDLE")
 
+    def botan_algo(self, algo):
+        """ハンドルの方式を切り替えて kuruma_settei.json に保存する（待機中だけ）"""
+        global LINE_ALGO
+        with self.lock:
+            if self.state != "IDLE" or algo not in ("pd", "pp"):
+                return
+            if algo == "pp" and not (self.pp is not None and self.pp.tsukaeru):
+                print("[方式] ピュアパシュートはキャリブレーションが済むまで選べません（pp_test.py）")
+                return
+            LINE_ALGO = algo
+            try:
+                line_algo.settei_kaku({"LINE_ALGO": algo})
+            except Exception as e:
+                print(f"[方式] 設定を保存できません ({e})")
+            print(f"[方式] ハンドルの方式を {algo} にしました")
+
     # ---- 計測サーバへの通過通知（レーンに出ている車だけ。失敗しても走行に影響なし） ----
     def keisoku_tsuchi(self):
         self.renkei.goal_tsuchi(self.goal_time, self.owari_riyu)
@@ -1206,7 +1288,9 @@ class RaceApp:
         self._csv = csv.writer(self._csv_file)
         self._csv.writerow(["時間[秒]", "横ズレ[px]", "遠くのズレ[px]", "傾き[度]",
                             "ライン", "マーク数", "ハンドル[%]", "アクセル[%]",
-                            "狙い[px]", "アクセル減[%]"])
+                            "狙い[px]", "アクセル減[%]",
+                            "方式", "今の方式のハンドル[%]", "PPのハンドル[%]",
+                            "PP目標の前[m]", "PP目標の左[m]", "PP先読み[m]", "PP点の数"])
         # --- 設定スナップショット(この走りがどんなセッティングだったかの記録) ---
         snap = {
             "nichiji": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1229,6 +1313,11 @@ class RaceApp:
             "KOTAI_KYOKAI": self.teashi.r_ten,
             "THROTTLE_N": self.teashi.n,
             "ZENSHIN_SAITEI": ZENSHIN_SAITEI, "KICK_BYO": KICK_BYO,
+            "LINE_ALGO": LINE_ALGO, "PP_LD_KIHON": PP_LD_KIHON, "PP_LD_SOKUDO": PP_LD_SOKUDO,
+            "PP_LD_SAISHO": PP_LD_SAISHO, "PP_SOKUDO_KEISU": PP_SOKUDO_KEISU,
+            "KIREKAKU_DO": KIREKAKU_DO, "WHEELBASE": WHEELBASE,
+            "PP_CURVE_GEN": PP_CURVE_GEN, "PP_CURVE_SAITEI": PP_CURVE_SAITEI, "PP_GATE": PP_GATE,
+            "PP_CALIB_ZUMI": bool(self.pp is not None and self.pp.tsukaeru),
         }
         with open(self._kiroku_base + "_settei.json", "w") as f:
             json.dump(snap, f, indent=2, ensure_ascii=False)
@@ -1240,7 +1329,16 @@ class RaceApp:
                                 kekka["katamuki"], int(kekka["line_mieru"]),
                                 len(kekka.get("marks", [])),
                                 f"{self.steer_sa:+.2f}", f"{self.accel:.1f}",
-                                kekka.get("nerai"), f"{self.accel_gen:.1f}"])
+                                kekka.get("nerai"), f"{self.accel_gen:.1f}",
+                                "pp" if self.pp_chu else "pd", f"{self.steer_pd:+.2f}",
+                                "" if self.steer_pp is None else f"{self.steer_pp:+.2f}"]
+                               + self._pp_kiroku(kekka))
+
+    @staticmethod
+    def _pp_kiroku(kekka):
+        pp = kekka.get("pp") or {}
+        m = pp.get("mokuhyo") or ("", "")
+        return [m[0], m[1], "" if pp.get("ld") is None else pp["ld"], len(pp.get("ten") or [])]
 
     def kiroku_shuryo(self):
         if self._csv_file:
@@ -1257,6 +1355,13 @@ class RaceApp:
             with self.lock:
                 ato = self.line_ato
             kekka = me_de_miru(gazou, ato)
+
+            # --- ピュアパシュートの計算（キャリブレーション済みのときだけ） ---
+            pp_keisan = self.pp is not None and self.pp.tsukaeru and (LINE_ALGO == "pp" or PP_MIRUDAKE)
+            if pp_keisan:
+                sen_dake = line_algo.sen_dake_tsukuru(gazou, LINE_IRO, KURO_SHIKII, SHIRO_SHIKII)
+                y_chikaku = gazou.shape[0] * (ROI_CHIKAKU_UE + ROI_CHIKAKU_SHITA) / 2
+                kekka["pp"] = self.pp.keisan(sen_dake, kekka["zure"], y_chikaku, self.accel)
 
             ima = time.time()
             dt = ima - mae_jikoku
@@ -1276,6 +1381,8 @@ class RaceApp:
                 state = self.state
 
             e = gamen_ni_kaku(gazou, kekka, state, ato)
+            if pp_keisan:        # 点群・先読みの円・目標点を描き足す（使っていないときは薄い色）
+                line_algo.gamen_ni_kaku(e, self.pp.henkan, kekka["pp"], LINE_ALGO == "pp")
             h2 = int(e.shape[0] * HAISHIN_HABA / e.shape[1])
             chiisai = cv2.resize(e, (HAISHIN_HABA, h2))
 
@@ -1333,6 +1440,12 @@ class RaceApp:
                 "owari_riyu": self.owari_riyu,
                 "chosei_zumi": self.teashi.chosei_zumi,
                 "keisoku": self.renkei.joutai(),
+                "algo": LINE_ALGO,
+                "pp_tsukaeru": bool(self.pp is not None and self.pp.tsukaeru),
+                "pp_ok": bool((self.kekka.get("pp") or {}).get("ok")),
+                "pp_ld": (self.kekka.get("pp") or {}).get("ld"),
+                "pp_kazu": len((self.kekka.get("pp") or {}).get("ten") or []),
+                "pp_kakudo": (self.kekka.get("pp") or {}).get("kakudo"),
             })
 
 
@@ -1390,6 +1503,13 @@ GAMEN_HTML = """<!DOCTYPE html>
   #lanebtns button.sel2 { background:#b0612f; border-color:#ffb27c; }
   #lanebtns button.sel0 { background:#4a525c; border-color:#aab3bd; }
   #lanemsg { font-size:12px; color:var(--dim); min-height:16px; line-height:1.4; }
+  #algobox { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:10px; display:flex; flex-direction:column; gap:8px; }
+  #algobox .k { font-size:12px; color:var(--dim); }
+  #algobtns { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  #algobtns button { padding:10px 2px; font-size:14px; background:#39414b; border:2px solid transparent; }
+  #algobtns button.sel { background:#2f8f8f; border-color:#7ce0e0; }
+  #algomsg { font-size:12px; color:var(--dim); min-height:16px; line-height:1.4; }
   #result { text-align:center; font-size:15px; color:var(--dim); min-height:20px; line-height:1.4; }
   #result.warn { color:#e0b45c; font-weight:700; }
   /* 細い画面（スマホ縦など）は縦に並べてスクロール */
@@ -1429,6 +1549,14 @@ GAMEN_HTML = """<!DOCTYPE html>
       </div>
       <div id="lanemsg"></div>
     </div>
+    <div id="algobox">
+      <div class="k">ハンドルの方式</div>
+      <div id="algobtns">
+        <button id="algo-pd" data-algo="pd">今の方式</button>
+        <button id="algo-pp" data-algo="pp">ピュアパシュート</button>
+      </div>
+      <div id="algomsg"></div>
+    </div>
     <div id="buttons">
       <button id="btn-arm">ARM — スタート待機</button>
       <button id="btn-stop">STOP — 停止</button>
@@ -1441,6 +1569,9 @@ GAMEN_HTML = """<!DOCTYPE html>
   document.querySelectorAll("#lanebtns button").forEach(b => b.onclick = () =>
     fetch("/lane", {method:"POST", headers:{"Content-Type":"application/json"},
                     body: JSON.stringify({lane: Number(b.dataset.lane)})}));
+  document.querySelectorAll("#algobtns button").forEach(b => b.onclick = () =>
+    fetch("/algo", {method:"POST", headers:{"Content-Type":"application/json"},
+                    body: JSON.stringify({algo: b.dataset.algo})}));
   const riyu = { goal:"ゴール!", line_lost:"ラインロスト", timeout:"タイムアウト",
                  tsushin_lost:"通信断のため停止" };
   async function poll() {
@@ -1472,6 +1603,15 @@ GAMEN_HTML = """<!DOCTYPE html>
         ? (k.message || "出ない: モニタに映らず、タイムも計測されません")
         : (k.message || "") + (k.setsuzoku ? `（${k.server}）` : "");
       $("lanemsg").className = k.lane !== 0 && !k.setsuzoku ? "ng" : "";
+      $("algo-pd").className = s.algo === "pd" ? "sel" : "";
+      $("algo-pp").className = s.algo === "pp" ? "sel" : "";
+      $("algo-pd").disabled = s.state !== "IDLE";
+      $("algo-pp").disabled = s.state !== "IDLE" || !s.pp_tsukaeru;
+      $("algomsg").textContent = !s.pp_tsukaeru
+        ? "ピュアパシュートは pp_test.py でキャリブレーションすると選べます"
+        : (s.pp_ok ? `目標点あり  先読み ${s.pp_ld} m ・ 点 ${s.pp_kazu} 個 ・ 切れ角 ${s.pp_kakudo}°`
+                   : "目標点なし（このコマは今の方式で走ります）")
+          + (s.algo === "pd" ? "  ※いまは計算して見比べているだけ" : "");
       $("btn-arm").disabled = !s.chosei_zumi && s.state === "IDLE" ? true : (s.state !== "IDLE");
       const r = $("result");
       if (!s.chosei_zumi) {
@@ -1553,6 +1693,13 @@ def handler_wo_tsukuru(app):
                     hashitteru = app.state == "RUNNING"
                 if not hashitteru:              # 走行中はレーンを変えない
                     app.renkei.lane_erabu(lane)
+            elif self.path == "/algo":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    algo = str(json.loads(self.rfile.read(n) or b"{}").get("algo", ""))
+                except (ValueError, TypeError):
+                    algo = ""
+                app.botan_algo(algo)
             else:
                 self.send_response(404)
                 self.end_headers()

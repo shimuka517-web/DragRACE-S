@@ -52,6 +52,13 @@ ssh pi099@099 "cd ~/DragRACE-S/docker && docker compose down"
   - **ドライバーが 2 つ動くとスキャンが乱れる。起動前に必ず `pkill -f ldlidar`**
 - 取り付け位置（base_link ＝ 後輪車軸の中心の真下の床）：LD19 (0.225, 0, 0.115)、IMU (0.170, 0, 0.037, ヨー +90°)
 
+## ライントレースの方式
+
+- `LINE_ALGO`（kuruma_settei.json）で切り替える。`pd`＝今の方式、`pp`＝ピュアパシュート（line_algo.py）
+- `pp_test.py`：キャリブレーションと確認の画面。**モーターもハンドルも動かさない**
+- 使い方は `docs/PP_TEST.md`、方式の比較は `docs/LINETRACE_EVAL.md`
+- rc_race.py・line_algo.py を直したら `python3 tools/linetrace_sim/gazou_test.py`（合成画像での試験、数分）で壊れていないか確かめる。ノートパソコンでも動く（numpy と opencv-python が要る）
+
 ## 必ずユーザーに確認してから行うこと
 
 - **モーター・スロットル・ステアリングを動かすもの**（rc_race.py、throttle_test.py、servo_test.py など）。車が走り出して危ないので、実行前に車輪が浮いているか・周りが安全かを必ず確認する
@@ -63,4 +70,4 @@ ssh pi099@099 "cd ~/DragRACE-S/docker && docker compose down"
 
 - ファイルの読み取り、git status / log / diff
 - feature ブランチでの commit と push
-- ラズパイでの git pull、センサーの読み取りだけのコマンド（/scan の確認、imu_test.py など）
+- ラズパイでの git pull、センサーの読み取りだけのコマンド（/scan の確認、imu_test.py、pp_test.py など）
