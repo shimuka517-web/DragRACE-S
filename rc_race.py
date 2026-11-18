@@ -658,7 +658,8 @@ def nou_de_handan(app, kekka, ima):
         # SAKIYOMI=0 なら近くの帯のズレそのもの（これまでどおり）。
         # ラインの色が横に広い（＝横線進入中など）ときは、
         # 計算がくるうのでハンドルを直前の値のまま保持する
-        if kekka["zure"] is not None and kekka["hirogari"] < STEER_HOJI_HIROGARI:
+        app.hoji = not (kekka["zure"] is not None and kekka["hirogari"] < STEER_HOJI_HIROGARI)
+        if not app.hoji:
             muki = -1 if HANDORU_GYAKU else 1
             # D項: 横ズレの前フレーム差分[px/フレーム] = ズレの勢い。
             # 直前フレームのズレが無いとき（発進直後・ロスト明け・保持明け）は
@@ -1223,6 +1224,7 @@ class RaceApp:
         self.steer_pd = 0.0          # 今の方式で計算したハンドル[%]
         self.steer_pp = None         # ピュアパシュートで計算したハンドル[%]（計算できないコマは None）
         self.pp_chu = False          # いまピュアパシュートのハンドルで走っているか
+        self.hoji = False            # 今の方式がハンドルを直前の値のまま保持したか（記録用）
         self.pp = None               # ピュアパシュートの計算係（line_algo.py）
         if line_algo is not None:
             self.pp = line_algo.PurePursuit(line_algo.settei_toridasu(globals()))
@@ -1319,7 +1321,8 @@ class RaceApp:
                             "ライン", "マーク数", "ハンドル[%]", "アクセル[%]",
                             "狙い[px]", "アクセル減[%]",
                             "方式", "今の方式のハンドル[%]", "PPのハンドル[%]",
-                            "PP目標の前[m]", "PP目標の左[m]", "PP先読み[m]", "PP点の数"])
+                            "PP目標の前[m]", "PP目標の左[m]", "PP先読み[m]", "PP点の数",
+                            "ラインの広がり", "ハンドル保持"])
         # --- 設定スナップショット(この走りがどんなセッティングだったかの記録) ---
         snap = {
             "nichiji": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1331,7 +1334,7 @@ class RaceApp:
             "STEER_P_GAIN": STEER_P_GAIN, "STEER_D_GAIN": STEER_D_GAIN,
             "BRAKE": BRAKE, "SAIDAI_SOKO_BYO": SAIDAI_SOKO_BYO,
             "STOP_BRAKE": STOP_BRAKE, "BRAKE_SAITEI_BYO": BRAKE_SAITEI_BYO,
-            "HANDORU_GYAKU": HANDORU_GYAKU,
+            "HANDORU_GYAKU": HANDORU_GYAKU, "KIREKAKU_HABA": KIREKAKU_HABA,
             "LINE_IRO": LINE_IRO,
             "KURO_SHIKII": KURO_SHIKII, "SHIRO_SHIKII": SHIRO_SHIKII,
             "TSUIZUI_GATE": TSUIZUI_GATE,
@@ -1362,13 +1365,16 @@ class RaceApp:
                                 kekka.get("nerai"), f"{self.accel_gen:.1f}",
                                 "pp" if self.pp_chu else "pd", f"{self.steer_pd:+.2f}",
                                 "" if self.steer_pp is None else f"{self.steer_pp:+.2f}"]
-                               + self._pp_kiroku(kekka))
+                               + self._pp_kiroku(kekka) + self._hoka_kiroku(kekka))
 
     @staticmethod
     def _pp_kiroku(kekka):
         pp = kekka.get("pp") or {}
         m = pp.get("mokuhyo") or ("", "")
         return [m[0], m[1], "" if pp.get("ld") is None else pp["ld"], len(pp.get("ten") or [])]
+
+    def _hoka_kiroku(self, kekka):
+        return [kekka.get("hirogari"), int(self.hoji)]
 
     def kiroku_shuryo(self):
         if self._csv_file:
