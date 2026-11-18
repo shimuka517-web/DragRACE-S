@@ -40,7 +40,7 @@ SETTEI_FILE = "kuruma_settei.json"
 
 # 設定の初期値（rc_race.py のブロック1 と同じ値。説明もそちらに書いてある）
 SHOKICHI = {
-    "PP_LD_KIHON": 0.45, "PP_LD_SOKUDO": 0.25, "PP_LD_SAISHO": 0.30,
+    "PP_LD_KIHON": 0.65, "PP_LD_SOKUDO": 0.25, "PP_LD_SAISHO": 0.30,
     "PP_SOKUDO_KEISU": 0.0, "KIREKAKU_DO": 25.0, "WHEELBASE": 0.257,
     "PP_CURVE_GEN": 0.0, "PP_CURVE_SAITEI": 0.5,
     "PP_GATE": 0.25,
@@ -342,8 +342,10 @@ class PurePursuit:
             t = self.henkan.px_kara_yuka([[self.henkan.size[0] / 2.0 + zure_px, y_px]])[0]
             if 0 < t[0] < 3.0:
                 tane = (float(t[0]), float(t[1]))
+        yobi = False              # 前のコマの位置（予備）から探したか
         if tane is None and self.mae_tane is not None and self.mae_tane_kazu <= 10:
             tane = self.mae_tane
+            yobi = True
         self.mae_tane_kazu += 1
         if tane is None:
             return kekka
@@ -352,7 +354,11 @@ class PurePursuit:
         kekka["ten"] = [(round(x, 3), round(y, 3)) for x, y in ten]
         if len(ten) < 2:
             return kekka
-        self.mae_tane, self.mae_tane_kazu = ten[0], 0
+        # 予備の位置から見つけた点は、次のコマの予備にしない。
+        # 予備を予備でつなぐと、ラインを見失った後も床の白い点々などを
+        # どこまでも追いかけてしまう（予備は最後にラインが見えたコマから 10 コマまで）
+        if not yobi:
+            self.mae_tane, self.mae_tane_kazu = ten[0], 0
         t = np.array(ten)
         r = np.hypot(t[:, 0], t[:, 1])
         kekka["todoita"] = round(float(r[-1]), 3)

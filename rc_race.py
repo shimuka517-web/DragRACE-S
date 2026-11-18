@@ -333,10 +333,14 @@ LINE_ALGO = "pd"      # ★ ハンドルの方式。"pd"＝今の方式（近く
                       #   "pp" でも、目標点が決まらないコマは自動で今の方式に戻る
 PP_MIRUDAKE = True    # 今の方式で走っているときも、ピュアパシュートの計算だけはして
                       # 画面と走行記録に残す（見比べ用）。重いと感じたら False
-PP_LD_KIHON = 0.45    # ★ 先読み距離[m]の基本。後輪の車軸からこの距離にあるライン上の点を狙う
+PP_LD_KIHON = 0.65    # ★ 先読み距離[m]の基本。後輪の車軸からこの距離にあるライン上の点を狙う
                       #   大きくする → ハンドルがなめらか。細かい蛇行をなぞらず、ならして走る。
                       #                ただしカーブの内側を通りやすくなる（インカット）
                       #   小さくする → ラインに忠実。ただしふらつきやすい
+                      #   画面の一番下が車軸から何m先かは pp_test の画面に出る（例: 0.40m）。
+                      #   それより 0.2m 以上遠くにする。近いと目標点が画面の下端に張り付き、
+                      #   奥のカーブを見ずに反応が遅れ、左右にふらついてラインが画面から外れる
+                      #   （2026-11-18 の走行で 0.45 → 0.65 に変更。docs/PP_COURSEOUT_20261118.md）
 PP_LD_SOKUDO = 0.25   # ★ 速度 1 m/s につき先読み距離を何m伸ばすか。速いほど遠くを見る
 PP_LD_SAISHO = 0.30   # 先読み距離の下限[m]
 PP_SOKUDO_KEISU = 0.0 # ★ アクセル 1% あたりの速度[m/s]（速度の見積もり用。センサーが無いため）
@@ -351,6 +355,10 @@ PP_CURVE_GEN = 0.0    # ★ カーブでアクセルを緩める強さ。0＝緩
                       #   アクセル = もとの値 × (1 − この値 × カーブのきつさ[1/m])
                       #   カーブのきつさは 1÷半径[m]。例: 0.2 なら半径 1m のカーブで 2割減
 PP_CURVE_SAITEI = 0.5 # カーブで緩めても、もとのアクセルのこの割合より下げない
+PP_HASHI = 0.75       # 近くの帯のラインが画面の端に寄っているときは、ピュアパシュートを使わず
+                      # 今の方式で切る。画面の中央から端までを 1 として、この割合より外側なら「端」。
+                      # 端ではラインの続きが画面の外にあり、点群が床の白い点々などに飛び移って
+                      # ハンドルを戻してしまうため（2026-11-18 の走行。docs/PP_COURSEOUT_20261118.md）
 PP_GATE = 0.25        # 点群をたどるとき「ラインの続き」とみなす距離[m]
                       #   大きくする → 急な角も追えるが、近くの別の物に飛び移りやすい
 PP_HENKAN = None      # 画素 ⇔ 床の位置 の変換（pp_test.py のキャリブレーションで保存される）
@@ -679,10 +687,14 @@ def nou_de_handan(app, kekka, ima):
 
         # --- 方式の切り替え ---
         # ピュアパシュートの結果（kekka["pp"]）があれば、ハンドルの量[%]に直しておく。
-        # LINE_ALGO="pp" で目標点が決まったコマはそれを使い、それ以外は上の今の方式を使う
+        # LINE_ALGO="pp" で目標点が決まったコマはそれを使い、それ以外は上の今の方式を使う。
+        # 近くの帯にラインが無いコマ・ラインが画面の端に寄っているコマ（コースアウトしかけ）は、
+        # ピュアパシュートを使わない。床の白い点々などをラインと間違えてハンドルを戻してしまうため。
+        # そのコマは今の方式（端なら大きく切る／見失ったら最後のハンドルを保持）で走る
         pp = kekka.get("pp")
         app.steer_pp = None
-        if pp and pp.get("ok"):
+        hashi = kekka["zure"] is not None and abs(kekka["zure"]) > PP_HASHI * CAM_WIDTH / 2
+        if pp and pp.get("ok") and kekka["line_mieru"] and not hashi:
             app.steer_pp = pp["sa"] * KIREKAKU_HABA * (-1 if HANDORU_GYAKU else 1)
         app.pp_chu = LINE_ALGO == "pp" and app.steer_pp is not None
         app.steer_sa = app.steer_pp if app.pp_chu else app.steer_pd
@@ -731,8 +743,8 @@ def nou_de_handan(app, kekka, ima):
             app.goal_kaisu = 0
 
         # ライン切断はバックアップ停止（マーカー見逃し・コースアウト時）
-        # （ピュアパシュートで目標点が見えている間は、近くの帯に無くても見失いとしない）
-        if not (kekka["line_mieru"] or app.pp_chu):
+        # （ピュアパシュートも近くの帯にラインがあるときだけ使うので、判定は共通）
+        if not kekka["line_mieru"]:
             if app.rosuto_kaisu == 0:
                 app.rosuto_hajime = keika
             app.rosuto_kaisu += 1
@@ -1350,6 +1362,7 @@ class RaceApp:
             "PP_LD_SAISHO": PP_LD_SAISHO, "PP_SOKUDO_KEISU": PP_SOKUDO_KEISU,
             "KIREKAKU_DO": KIREKAKU_DO, "WHEELBASE": WHEELBASE,
             "PP_CURVE_GEN": PP_CURVE_GEN, "PP_CURVE_SAITEI": PP_CURVE_SAITEI, "PP_GATE": PP_GATE,
+            "PP_HASHI": PP_HASHI,
             "PP_CALIB_ZUMI": bool(self.pp is not None and self.pp.tsukaeru),
         }
         with open(self._kiroku_base + "_settei.json", "w") as f:
