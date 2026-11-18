@@ -73,8 +73,11 @@ CAM_VFLIP  = False    # ★ 映像の上下反転。画面が上下逆さまの�
 # ------------------------------------------------------------------------------
 # ライン検出（黒線をどう見つけるか）
 # ------------------------------------------------------------------------------
-LINE_IRO = "shiro"     # ラインの色。"kuro"＝黒線 / "shiro"＝白線。
-                      # この実習は黒線（光沢床の映り込みは白く写るため）
+LINE_IRO = "shiro"    # ラインの色。"kuro"＝黒線 / "shiro"＝白線。
+                      # 授業の実習は黒線（光沢床の映り込みは白く写るため）。
+                      # この車は白線のコースに合わせて "shiro"（2026-11 ラズパイで調整）。
+                      # 白線のときは、照明の映り込みもラインと間違えやすいので
+                      # SHIRO_SHIKII（kyotsu_settei.json）を camera_test.py で合わせること
 SHIRO_SHIKII = 180    # 白線モード用のしきい値。黒線モードでは使われない
 KURO_SHIKII  = 80     # ★ 「これより暗い画素＝ライン」とみなす境目 (0=真っ黒〜255=真っ白)
                       #   大きくする → 薄暗い色まで拾う。ラインを見失いにくいが、
@@ -981,9 +984,11 @@ class Kamera:
     def toru(self):
         if self.picam2 is not None:
             return self.picam2.capture_array()
-        img = np.full((CAM_HEIGHT, CAM_WIDTH, 3), 170, np.uint8)
+        kuro = LINE_IRO == "kuro"          # テスト映像もラインの色に合わせる
+        img = np.full((CAM_HEIGHT, CAM_WIDTH, 3), 170 if kuro else 110, np.uint8)
+        iro = (30, 30, 30) if kuro else (235, 235, 235)
         cv2.line(img, (CAM_WIDTH // 2 + 15, CAM_HEIGHT),
-                 (CAM_WIDTH // 2 - 10, int(CAM_HEIGHT * 0.4)), (30, 30, 30), 14)
+                 (CAM_WIDTH // 2 - 10, int(CAM_HEIGHT * 0.4)), iro, 14)
         time.sleep(0.033)
         return img
 

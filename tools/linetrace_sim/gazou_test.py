@@ -4,6 +4,8 @@
 
     python3 tools/linetrace_sim/gazou_test.py
 
+ラインの色は rc_race.py の LINE_IRO（黒線 / 白線）に合わせて描く。
+
 確かめること:
   1. キャリブレーション（四角形の4つの角 → 画素⇔床の変換）の精度
   2. 合成画像でコースを1周できるか（今の方式とピュアパシュートを同じ条件で比べる）
@@ -42,12 +44,14 @@ def satsuei(trk, i0, x, y, yaw, rng, sen_haba=0.03, noise=1.0):
     dx, dy = trk.xy[idx, 0] - x, trk.xy[idx, 1] - y
     c, s = math.cos(yaw), math.sin(yaw)
     xv, yv = c * dx + s * dy, -s * dx + c * dy
-    shitae = np.full((int(3.2 * S), int(3.0 * S)), 170, np.uint8)     # x: -0.2〜3.0, y: ±1.5
+    # ラインの色は rc_race.py の LINE_IRO に合わせる（黒線: 明るい床に黒 / 白線: 暗い床に白）
+    yuka_iro, sen_iro = (170, 30) if rc_race.LINE_IRO == "kuro" else (110, 235)
+    shitae = np.full((int(3.2 * S), int(3.0 * S)), yuka_iro, np.uint8)     # x: -0.2〜3.0, y: ±1.5
     pts = np.column_stack([(1.5 - yv) * S, (3.0 - xv) * S]).astype(np.int32)
-    cv2.polylines(shitae, [pts.reshape(-1, 1, 2)], False, 30, max(1, int(round(sen_haba * S))), cv2.LINE_AA)
+    cv2.polylines(shitae, [pts.reshape(-1, 1, 2)], False, sen_iro, max(1, int(round(sen_haba * S))), cv2.LINE_AA)
     G = yuka_kara_gaso(sim.CAM_PITCH + rng.normal(0, math.radians(0.4)) * noise)   # 縦揺れ
     A = np.array([[0, -1 / S, 3.0], [-1 / S, 0, 1.5], [0, 0, 1]])                 # 下絵の画素 → 床
-    img = cv2.warpPerspective(shitae, G @ A, (W, H), flags=cv2.INTER_LINEAR, borderValue=170)
+    img = cv2.warpPerspective(shitae, G @ A, (W, H), flags=cv2.INTER_LINEAR, borderValue=yuka_iro)
     img = np.clip(img.astype(np.float32) + rng.normal(0, 6 * noise, img.shape), 0, 255).astype(np.uint8)
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
