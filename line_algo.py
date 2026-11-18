@@ -67,6 +67,45 @@ def settei_kaku(atai):
         json.dump(settei, f, indent=2, ensure_ascii=False)
 
 
+KYOTSU_FILE = "kyotsu_settei.json"
+
+
+def kyotsu_ni_kaku(namae, atai):
+    """kyotsu_settei.json（会場で共通の設定）の数値を1つ書き換える。
+       このファイルは Git で管理していて、説明の行や空行で読みやすく整えてあるので、
+       ファイル全体を書き直さず、その値の数字の所だけを置き換える。
+       値がまだ無ければ、最初の「{」のすぐ後ろに足す。"""
+    import re
+    with open(KYOTSU_FILE, encoding="utf-8") as f:
+        moji = f.read()
+    kata = re.compile(r'("' + re.escape(namae) + r'"\s*:\s*)(-?\d+(?:\.\d+)?)')
+    if kata.search(moji):
+        moji = kata.sub(lambda m: m.group(1) + str(atai), moji, count=1)
+    else:
+        i = moji.index("{") + 1
+        moji = moji[:i] + f'\n  "{namae}": {atai},' + moji[i:]
+    json.loads(moji)                      # 壊れた JSON にしていないか確かめてから書く
+    with open(KYOTSU_FILE, "w", encoding="utf-8") as f:
+        f.write(moji)
+
+
+def settei_kesu(namae):
+    """kuruma_settei.json から値を消す（共通設定の値が効くようにするため）"""
+    if not os.path.exists(SETTEI_FILE):
+        return False
+    try:
+        with open(SETTEI_FILE) as f:
+            settei = json.load(f)
+    except Exception:
+        return False
+    if namae not in settei:
+        return False
+    del settei[namae]
+    with open(SETTEI_FILE, "w") as f:
+        json.dump(settei, f, indent=2, ensure_ascii=False)
+    return True
+
+
 # ==============================================================================
 # 部品1: 画素 ⇔ 床の位置 の変換
 # ==============================================================================

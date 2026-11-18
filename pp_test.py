@@ -165,10 +165,21 @@ class PpTestApp:
 
     def atai_hozon(self):
         with self.lock:
-            line_algo.settei_kaku({n: self.settei[n] for n, *_ in CHOSEI})
+            # しきい値は会場の照明で決まる値なので、授業用と同じく共通設定（kyotsu_settei.json）へ。
+            # それ以外（ピュアパシュートの値）は車ごとの設定（kuruma_settei.json）へ
+            shikii = SHIKII[0]
+            line_algo.kyotsu_ni_kaku(shikii, int(self.settei[shikii]))
+            if line_algo.settei_kesu(shikii):
+                # 車ごとの設定に同じ名前があると、共通設定より優先されてしまうので消す
+                print(f"[保存] {line_algo.SETTEI_FILE} にあった {shikii} を消しました（共通設定の値を使うため）")
+            line_algo.settei_kaku({n: self.settei[n] for n, *_ in CHOSEI if n != shikii})
             self.mihozon = False
-            self.message = "値を保存しました（rc_race.py にも反映されます）"
-            print(f"[保存] 調整した値を {line_algo.SETTEI_FILE} に保存しました")
+            self.message = (f"保存しました。{shikii}={int(self.settei[shikii])} は kyotsu_settei.json、"
+                            "ほかは kuruma_settei.json（rc_race.py にも反映されます）")
+            print(f"[保存] {shikii}={int(self.settei[shikii])} を {line_algo.KYOTSU_FILE} に、"
+                  f"ほかの値を {line_algo.SETTEI_FILE} に保存しました")
+            print(f"[保存] {line_algo.KYOTSU_FILE} は Git で管理しているファイルです。"
+                  "残すなら、ノートパソコン側にも同じ値を入れて commit してください")
 
     def shirokuro_kirikae(self):
         with self.lock:
@@ -393,7 +404,7 @@ GAMEN_HTML = """<!DOCTYPE html>
           <span><i style="background:#0080ff"></i>今の方式の近くの帯</span>
         </div>
         <div class="row"><button id="shirokuro" class="b-gray">白黒で見る（ラインと判定した所が白）</button></div>
-        <div class="hint">白黒にすると、しきい値の効き方がよく分かります。ラインだけが白く、床や照明の映り込みが黒くなるように「ラインのしきい値」を合わせてください</div>
+        <div class="hint">白黒にすると、しきい値の効き方がよく分かります。ラインだけが白く、床や照明の映り込みが黒くなるように、右の「値の調整」の一番上のしきい値を合わせてください。しきい値は会場の照明で決まる値なので、共通設定（kyotsu_settei.json）に保存されます</div>
       </div>
       <div class="card">
         <h2>真上から見た図（マス目は10cm。下の四角が車、前が上）</h2>
