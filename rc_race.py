@@ -372,6 +372,14 @@ BRAKE = 50              # ★ ゴール後ブレーキの強さ（0〜100%）
                         #   小さくする → 滑らかだが制動距離が伸びる（5mを超えたら失格級）
 BRAKE_BYO = 1.0         # ブレーキを出す時間[秒]。長くしすぎるとESCの仕様で
                         # 後退に入ることがあるため、大きく変えないこと
+STOP_BRAKE = False      # ★ STOPボタン・時間切れ・通信断で止めるときもブレーキを使うか
+                        #   ブレーキは「後退側の信号」なので、車が止まっているときに出すと
+                        #   ESCは後退として扱い、車が思いきり下がる（2026-11 実際に起きた）。
+                        #   False → Nに戻すだけ（惰性で止まる）。ゴール・ラインロストは、
+                        #           車が走っていたはずなのでブレーキを使う
+                        #   True  → これまでどおり、どの止め方でもブレーキを使う
+BRAKE_SAITEI_BYO = 1.0  # 走り始めてからこの秒数より前に止めるときは、ブレーキを使わない
+                        # （発進直後はまだ動いていないことがあり、ブレーキが後退になるため）
 
 # ------------------------------------------------------------------------------
 # 安全装置
@@ -748,7 +756,11 @@ def nou_de_handan(app, kekka, ima):
             app.owari_riyu = riyu
             app.accel = 0
             app.kiroku_shuryo()
-            app.teashi.tomaru()      # ブレーキ→N を自動実行
+            # ブレーキ→N を自動実行。ただし車が動いていない恐れがあるときは N だけ
+            if app.brake_shite_yoi(riyu, keika):
+                app.teashi.tomaru()
+            else:
+                app.teashi.neutral()
             print(f"[脳] 終了({riyu}) タイム {app.goal_time:.2f} 秒")
             app.keisoku_tsuchi()     # 計測サーバへ通過を通知（設定時のみ）
 
@@ -1253,15 +1265,27 @@ class RaceApp:
     def botan_stop(self):
         with self.lock:
             mae = self.state
+            keika = time.time() - self.start_jikoku if self.start_jikoku else 0.0
             self.state = "IDLE"
             self.accel = 0
             self.kiroku_shuryo()
-            if mae == "RUNNING":
+            if mae == "RUNNING" and self.brake_shite_yoi("stop", keika):
                 self.teashi.tomaru()        # 走行中ならブレーキ→N
             else:
                 self.teashi.neutral()
             if mae != "IDLE":
                 print(f"[ボタン] STOP: {mae} → IDLE")
+
+    @staticmethod
+    def brake_shite_yoi(riyu, keika):
+        """止めるときにブレーキ（後退側の信号）を出してよいか。
+           車が止まっているときにブレーキを出すと、ESCは後退として扱い車が下がるので、
+           車が走っていたと言える時だけ出す（STOP_BRAKE・BRAKE_SAITEI_BYO で変えられる）"""
+        if keika < BRAKE_SAITEI_BYO:
+            return False
+        if riyu in ("goal", "line_lost"):
+            return True
+        return bool(STOP_BRAKE)
 
     def botan_algo(self, algo):
         """ハンドルの方式を切り替えて kuruma_settei.json に保存する（待機中だけ）"""
@@ -1306,6 +1330,7 @@ class RaceApp:
             "ACCEL_KAGEN": ACCEL_KAGEN, "CHOKUSEN_HANDORU": CHOKUSEN_HANDORU,
             "STEER_P_GAIN": STEER_P_GAIN, "STEER_D_GAIN": STEER_D_GAIN,
             "BRAKE": BRAKE, "SAIDAI_SOKO_BYO": SAIDAI_SOKO_BYO,
+            "STOP_BRAKE": STOP_BRAKE, "BRAKE_SAITEI_BYO": BRAKE_SAITEI_BYO,
             "HANDORU_GYAKU": HANDORU_GYAKU,
             "LINE_IRO": LINE_IRO,
             "KURO_SHIKII": KURO_SHIKII, "SHIRO_SHIKII": SHIRO_SHIKII,

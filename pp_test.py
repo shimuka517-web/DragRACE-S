@@ -44,8 +44,15 @@ HTTP_PORT = rc_race.HTTP_PORT
 HAISHIN_FPS = rc_race.HAISHIN_FPS
 HAISHIN_GASHITSU = rc_race.HAISHIN_GASHITSU
 
+# ラインと判定するしきい値（ラインの色で使う値が変わる）
+if rc_race.LINE_IRO == "kuro":
+    SHIKII = ("KURO_SHIKII", "黒線と判定する暗さ（これより暗い所がライン）", 20, 160, 1)
+else:
+    SHIKII = ("SHIRO_SHIKII", "白線と判定する明るさ（これより明るい所がライン）", 100, 250, 1)
+
 # 画面で変えられる値: (名前, 説明, 最小, 最大, きざみ)
 CHOSEI = [
+    SHIKII,
     ("PP_LD_KIHON", "先読み距離の基本 [m]", 0.20, 1.20, 0.05),
     ("PP_LD_SOKUDO", "速度1m/sあたりの伸び [m]", 0.00, 0.50, 0.05),
     ("PP_SOKUDO_KEISU", "アクセル1%あたりの速度 [m/s]", 0.00, 0.30, 0.01),
@@ -60,6 +67,8 @@ class PpTestApp:
         self.lock = threading.Lock()
         self.ugoiteru = True
         self.settei = line_algo.settei_toridasu(vars(rc_race))
+        self.settei[SHIKII[0]] = getattr(rc_race, SHIKII[0])
+        self.shirokuro = False        # 映像を「ラインと判定した所だけ白」の白黒で見せる
         self.pp = line_algo.PurePursuit(self.settei)
         self.algo = rc_race.LINE_ALGO if rc_race.LINE_ALGO in ("pd", "pp") else "pd"
         self.mihozon = False          # 画面で変えた値をまだ保存していない
@@ -145,7 +154,12 @@ class PpTestApp:
             for n, _, saisho, saidai, _ in CHOSEI:
                 if n == namae:
                     self.settei[n] = max(saisho, min(saidai, float(atai)))
-                    self.pp.settei_kaeru(self.settei)
+                    if n == SHIKII[0]:
+                        # しきい値は rc_race の検出（今の方式）と点群の両方に効かせる
+                        self.settei[n] = int(round(self.settei[n]))
+                        setattr(rc_race, n, self.settei[n])
+                    else:
+                        self.pp.settei_kaeru(self.settei)
                     self.mihozon = True
                     return
 
@@ -155,6 +169,10 @@ class PpTestApp:
             self.mihozon = False
             self.message = "値を保存しました（rc_race.py にも反映されます）"
             print(f"[保存] 調整した値を {line_algo.SETTEI_FILE} に保存しました")
+
+    def shirokuro_kirikae(self):
+        with self.lock:
+            self.shirokuro = not self.shirokuro
 
     def algo_erabu(self, algo):
         with self.lock:
@@ -199,17 +217,23 @@ class PpTestApp:
 
             # ピュアパシュート
             kekka_pp = {}
+            sen_dake = line_algo.sen_dake_tsukuru(gazou, rc_race.LINE_IRO,
+                                                  rc_race.KURO_SHIKII, rc_race.SHIRO_SHIKII)
             with self.lock:
                 pp, henkan = self.pp, self.pp.henkan
+                shirokuro = self.shirokuro
                 if pp.tsukaeru:
-                    sen_dake = line_algo.sen_dake_tsukuru(gazou, rc_race.LINE_IRO,
-                                                          rc_race.KURO_SHIKII, rc_race.SHIRO_SHIKII)
                     y_c = gazou.shape[0] * (rc_race.ROI_CHIKAKU_UE + rc_race.ROI_CHIKAKU_SHITA) / 2
                     kekka_pp = pp.keisan(sen_dake, kekka["zure"], y_c, sotei)
                     kekka_pp["handoru"] = round(kekka_pp["sa"] * rc_race.KIREKAKU_HABA * muki, 2)
 
             # --- カメラ映像 ---
-            e = rc_race.gamen_ni_kaku(gazou, kekka, "PP TEST", ato)
+            if shirokuro:
+                # ラインと判定した所を白、それ以外を黒にした絵の上に、同じ印を描く
+                moto = cv2.cvtColor(sen_dake, cv2.COLOR_GRAY2BGR)
+            else:
+                moto = gazou
+            e = rc_race.gamen_ni_kaku(moto, kekka, "PP TEST", ato)
             if henkan is not None:
                 line_algo.gamen_ni_kaku(e, henkan, kekka_pp, True)
             for n, (x, y) in enumerate(kado):
@@ -283,6 +307,8 @@ class PpTestApp:
                 "atai": {n: self.settei[n] for n, *_ in CHOSEI},
                 "mihozon": self.mihozon,
                 "algo": self.algo,
+                "shirokuro": self.shirokuro,
+                "line_iro": rc_race.LINE_IRO,
                 "fps": round(self.fps, 1),
                 "message": self.message,
             })
@@ -366,6 +392,8 @@ GAMEN_HTML = """<!DOCTYPE html>
           <span><i style="background:#00e6ff;height:3px;vertical-align:3px"></i>先読みの円</span>
           <span><i style="background:#0080ff"></i>今の方式の近くの帯</span>
         </div>
+        <div class="row"><button id="shirokuro" class="b-gray">白黒で見る（ラインと判定した所が白）</button></div>
+        <div class="hint">白黒にすると、しきい値の効き方がよく分かります。ラインだけが白く、床や照明の映り込みが黒くなるように「ラインのしきい値」を合わせてください</div>
       </div>
       <div class="card">
         <h2>真上から見た図（マス目は10cm。下の四角が車、前が上）</h2>
@@ -420,7 +448,7 @@ GAMEN_HTML = """<!DOCTYPE html>
       </div>
 
       <div class="card">
-        <h2>値の調整（動かすとすぐ図に反映。気に入ったら保存）</h2>
+        <h2>値の調整（動かすとすぐ映像と図に反映。気に入ったら保存）</h2>
         <div class="chosei" id="chosei"></div>
         <div class="chosei">
           <div class="nm">想定するアクセル [%]（保存されない。先読み距離の伸びを見る用）</div>
@@ -447,6 +475,8 @@ GAMEN_HTML = """<!DOCTYPE html>
   const post = (path, data) => fetch(path, {method:"POST",
     headers:{"Content-Type":"application/json"}, body: JSON.stringify(data || {})});
   const CHOSEI = __CHOSEI__;
+  const KIZAMI = Object.fromEntries(CHOSEI.map(c => [c[0], c[4]]));
+  const keta = (n, v) => Number(v).toFixed((KIZAMI[n] ?? 0.01) >= 1 ? 0 : 2);
   let sawatteru = null;            // いま動かしているスライダー（動かしている間は上書きしない）
 
   // 調整スライダーを作る
@@ -457,7 +487,7 @@ GAMEN_HTML = """<!DOCTYPE html>
   });
   [...CHOSEI.map(c => c[0]), "SOTEI_ACCEL"].forEach(n => {
     const sl = $("sl-" + n);
-    sl.oninput = () => { sawatteru = n; $("at-" + n).textContent = Number(sl.value).toFixed(2);
+    sl.oninput = () => { sawatteru = n; $("at-" + n).textContent = keta(n, sl.value);
                          post("/atai", {namae: n, atai: Number(sl.value)}); };
     sl.onchange = () => { sawatteru = null; };
   });
@@ -472,6 +502,7 @@ GAMEN_HTML = """<!DOCTYPE html>
     haba: Number($("s-haba").value) / 100, okuyuki: Number($("s-oku").value) / 100,
     kyori: Number($("s-kyori").value) / 100, yoko: Number($("s-yoko").value) / 100});
   $("hozon").onclick = () => post("/hozon");
+  $("shirokuro").onclick = () => post("/shirokuro");
   $("a-pd").onclick = () => post("/algo", {algo: "pd"});
   $("a-pp").onclick = () => post("/algo", {algo: "pp"});
 
@@ -521,7 +552,7 @@ GAMEN_HTML = """<!DOCTYPE html>
 
       Object.entries(s.atai).forEach(([n, v]) => {
         if (sawatteru === n) return;
-        $("sl-" + n).value = v; $("at-" + n).textContent = Number(v).toFixed(2);
+        $("sl-" + n).value = v; $("at-" + n).textContent = keta(n, v);
       });
       if (sawatteru !== "SOTEI_ACCEL") {
         $("sl-SOTEI_ACCEL").value = s.sotei_accel; $("at-SOTEI_ACCEL").textContent = s.sotei_accel.toFixed(0);
@@ -531,6 +562,8 @@ GAMEN_HTML = """<!DOCTYPE html>
       $("h-sokudo").textContent = s.atai.PP_SOKUDO_KEISU > 0
         ? `アクセル ${s.sotei_accel.toFixed(0)}% のとき、速度を ${f2(s.sokudo)} m/s と見積もり、先読み距離は ${f2(s.ld)} m`
         : "「アクセル1%あたりの速度」が 0 の間は、先読み距離は基本の値で固定です";
+      $("shirokuro").textContent = s.shirokuro ? "カメラの映像に戻す" : "白黒で見る（ラインと判定した所が白）";
+      $("shirokuro").className = s.shirokuro ? "b-sel" : "b-gray";
       $("a-pd").className = s.algo === "pd" ? "b-sel" : "b-gray";
       $("a-pp").className = s.algo === "pp" ? "b-sel" : "b-gray";
       $("a-pp").disabled = !s.calib_zumi;
@@ -611,6 +644,8 @@ def handler_wo_tsukuru(app):
                     app.atai_hozon()
                 elif self.path == "/algo":
                     app.algo_erabu(str(d.get("algo", "")))
+                elif self.path == "/shirokuro":
+                    app.shirokuro_kirikae()
                 else:
                     self.send_response(404)
                     self.end_headers()

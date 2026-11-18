@@ -57,6 +57,7 @@ ssh pi099@099 "cd ~/DragRACE-S/docker && docker compose down"
 - `LINE_ALGO`（kuruma_settei.json）で切り替える。`pd`＝今の方式、`pp`＝ピュアパシュート（line_algo.py）
 - `pp_test.py`：キャリブレーションと確認の画面。**モーターもハンドルも動かさない**
 - 使い方は `docs/PP_TEST.md`、方式の比較は `docs/LINETRACE_EVAL.md`
+- 授業用 DragRACE と走り方が違うときは `python3 tools/settei_hikaku.py`（ラズパイで。~/DragRACE と kuruma_settei.json を比べ、出る信号を計算する。読むだけ）
 - rc_race.py・line_algo.py を直したら `python3 tools/linetrace_sim/gazou_test.py`（合成画像での試験、数分）で壊れていないか確かめる。ノートパソコンでも動く（numpy と opencv-python が要る）
 
 ## 必ずユーザーに確認してから行うこと
