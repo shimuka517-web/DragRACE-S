@@ -53,7 +53,12 @@ else:
 # 画面で変えられる値: (名前, 説明, 最小, 最大, きざみ)
 CHOSEI = [
     SHIKII,
+    ("PP_SA", "周りの床との明るさの差の下限（大きいほど、はっきりした線だけ）", 5, 100, 1),
+    ("PP_HABA_MIN", "ライン幅の下限 [m]（これより細いものは消す）", 0.005, 0.050, 0.005),
+    ("PP_HABA_MAX", "ライン幅の上限 [m]（これより太い塊は消す）", 0.030, 0.150, 0.005),
+    ("PP_GATE_Y", "前のコマの位置から、左右に探す範囲 [m]", 0.10, 0.80, 0.05),
     ("PP_LD_KIHON", "先読み距離の基本 [m]", 0.20, 1.20, 0.05),
+    ("PP_LD_CURVE", "カーブで先読み距離を縮める強さ", 0.0, 2.0, 0.1),
     ("PP_LD_SOKUDO", "速度1m/sあたりの伸び [m]", 0.00, 0.50, 0.05),
     ("PP_SOKUDO_KEISU", "アクセル1%あたりの速度 [m/s]", 0.00, 0.30, 0.01),
     ("KIREKAKU_DO", "ハンドル1.00の切れ角 [°]", 10.0, 40.0, 0.5),
@@ -165,18 +170,20 @@ class PpTestApp:
 
     def atai_hozon(self):
         with self.lock:
-            # しきい値は会場の照明で決まる値なので、授業用と同じく共通設定（kyotsu_settei.json）へ。
-            # それ以外（ピュアパシュートの値）は車ごとの設定（kuruma_settei.json）へ
-            shikii = SHIKII[0]
-            line_algo.kyotsu_ni_kaku(shikii, int(self.settei[shikii]))
-            if line_algo.settei_kesu(shikii):
-                # 車ごとの設定に同じ名前があると、共通設定より優先されてしまうので消す
-                print(f"[保存] {line_algo.SETTEI_FILE} にあった {shikii} を消しました（共通設定の値を使うため）")
-            line_algo.settei_kaku({n: self.settei[n] for n, *_ in CHOSEI if n != shikii})
+            # 会場の照明・床・ラインで決まる値（しきい値・明るさの差・ライン幅）は、授業用と同じく
+            # 共通設定（kyotsu_settei.json）へ。それ以外（ピュアパシュートの値）は車ごとの設定へ
+            kyotsu = [SHIKII[0], "PP_SA", "PP_HABA_MIN", "PP_HABA_MAX"]
+            for n in kyotsu:
+                v = int(self.settei[n]) if n in (SHIKII[0], "PP_SA") else round(float(self.settei[n]), 3)
+                line_algo.kyotsu_ni_kaku(n, v)
+                if line_algo.settei_kesu(n):
+                    # 車ごとの設定に同じ名前があると、共通設定より優先されてしまうので消す
+                    print(f"[保存] {line_algo.SETTEI_FILE} にあった {n} を消しました（共通設定の値を使うため）")
+            line_algo.settei_kaku({n: self.settei[n] for n, *_ in CHOSEI if n not in kyotsu})
             self.mihozon = False
-            self.message = (f"保存しました。{shikii}={int(self.settei[shikii])} は kyotsu_settei.json、"
+            self.message = ("保存しました。しきい値・明るさの差・ライン幅は kyotsu_settei.json、"
                             "ほかは kuruma_settei.json（rc_race.py にも反映されます）")
-            print(f"[保存] {shikii}={int(self.settei[shikii])} を {line_algo.KYOTSU_FILE} に、"
+            print(f"[保存] {', '.join(f'{n}={self.settei[n]}' for n in kyotsu)} を {line_algo.KYOTSU_FILE} に、"
                   f"ほかの値を {line_algo.SETTEI_FILE} に保存しました")
             print(f"[保存] {line_algo.KYOTSU_FILE} は Git で管理しているファイルです。"
                   "残すなら、ノートパソコン側にも同じ値を入れて commit してください")
@@ -228,23 +235,29 @@ class PpTestApp:
 
             # ピュアパシュート
             kekka_pp = {}
-            sen_dake = line_algo.sen_dake_tsukuru(gazou, rc_race.LINE_IRO,
-                                                  rc_race.KURO_SHIKII, rc_race.SHIRO_SHIKII)
+            shikii = getattr(rc_race, SHIKII[0])
+            moto_shirokuro = None
             with self.lock:
                 pp, henkan = self.pp, self.pp.henkan
                 shirokuro = self.shirokuro
+                algo = self.algo
                 if pp.tsukaeru:
-                    y_c = gazou.shape[0] * (rc_race.ROI_CHIKAKU_UE + rc_race.ROI_CHIKAKU_SHITA) / 2
-                    kekka_pp = pp.keisan(sen_dake, kekka["zure"], y_c, sotei)
+                    # 本番（rc_race.py）と同じ「足元からたどる検出」
+                    kekka_pp = pp.keisan_gazou(cv2.cvtColor(gazou, cv2.COLOR_BGR2GRAY),
+                                               rc_race.LINE_IRO, shikii, sotei)
                     kekka_pp["handoru"] = round(kekka_pp["sa"] * rc_race.KIREKAKU_HABA * muki, 2)
+                    if shirokuro:
+                        sz = (gazou.shape[1], gazou.shape[0])
+                        moto_shirokuro = cv2.cvtColor(pp.ken.gazou_ni_modosu(sz), cv2.COLOR_GRAY2BGR)
 
             # --- カメラ映像 ---
-            if shirokuro:
-                # ラインと判定した所を白、それ以外を黒にした絵の上に、同じ印を描く
-                moto = cv2.cvtColor(sen_dake, cv2.COLOR_GRAY2BGR)
+            if moto_shirokuro is not None:
+                # 足元からたどる検出の結果: ラインとして選んだ塊=白、ほかのラインらしい所=灰色
+                moto = moto_shirokuro
             else:
                 moto = gazou
-            e = rc_race.gamen_ni_kaku(moto, kekka, "PP TEST", ato)
+            e = rc_race.gamen_ni_kaku(moto, kekka, "PP TEST", ato,
+                                      obi_miseru=not (algo == "pp" and pp.tsukaeru))
             if henkan is not None:
                 line_algo.gamen_ni_kaku(e, henkan, kekka_pp, True)
             for n, (x, y) in enumerate(kado):
@@ -304,6 +317,7 @@ class PpTestApp:
                 "mieru_chikai": None if chikai is None else round(chikai, 2),
                 "mieru_tooi": None if tooi is None else round(tooi, 2),
                 "line_mieru": bool(self.kekka.get("line_mieru")),
+                "joutai": pp.get("joutai"),
                 "pp_ok": bool(pp.get("ok")),
                 "kazu": len(pp.get("ten") or []),
                 "todoita": pp.get("todoita"),
@@ -404,7 +418,7 @@ GAMEN_HTML = """<!DOCTYPE html>
           <span><i style="background:#0080ff"></i>今の方式の近くの帯</span>
         </div>
         <div class="row"><button id="shirokuro" class="b-gray">白黒で見る（ラインと判定した所が白）</button></div>
-        <div class="hint">白黒にすると、しきい値の効き方がよく分かります。ラインだけが白く、床や照明の映り込みが黒くなるように、右の「値の調整」の一番上のしきい値を合わせてください。しきい値は会場の照明で決まる値なので、共通設定（kyotsu_settei.json）に保存されます</div>
+        <div class="hint">白黒にすると、検出の結果がよく分かります。<b>白＝ラインとして選んだ塊</b>、<b>灰色＝ラインらしいが選ばれなかった所</b>、黒＝それ以外です。ラインだけが白く、床や照明の映り込みが黒くなるように、右の「値の調整」の上から3つ（しきい値・明るさの差・ライン幅）を合わせてください。これらは会場の照明・床・ラインで決まる値なので、共通設定（kyotsu_settei.json）に保存されます</div>
       </div>
       <div class="card">
         <h2>真上から見た図（マス目は10cm。下の四角が車、前が上）</h2>
@@ -476,7 +490,7 @@ GAMEN_HTML = """<!DOCTYPE html>
           <button id="a-pd" class="b-gray">今の方式</button>
           <button id="a-pp" class="b-gray">ピュアパシュート</button>
         </div>
-        <div class="hint">rc_race.py の画面でも切り替えられます。ピュアパシュートを選んでも、目標点が決まらないコマは自動で今の方式に戻ります。<b>初めて切り替えたときは、車輪を浮かせてハンドルの向きを確かめてから走らせてください</b></div>
+        <div class="hint">rc_race.py の画面でも切り替えられます。ピュアパシュートを選ぶと、画面の帯は使わず、足元からたどる検出だけで走ります。ラインが見えないコマは最後のハンドルを保持します（今の方式には戻りません）。<b>初めて切り替えたときは、車輪を浮かせてハンドルの向きを確かめてから走らせてください</b></div>
       </div>
     </div>
   </div>
@@ -487,7 +501,7 @@ GAMEN_HTML = """<!DOCTYPE html>
     headers:{"Content-Type":"application/json"}, body: JSON.stringify(data || {})});
   const CHOSEI = __CHOSEI__;
   const KIZAMI = Object.fromEntries(CHOSEI.map(c => [c[0], c[4]]));
-  const keta = (n, v) => Number(v).toFixed((KIZAMI[n] ?? 0.01) >= 1 ? 0 : 2);
+  const keta = (n, v) => Number(v).toFixed((KIZAMI[n] ?? 0.01) >= 1 ? 0 : ((KIZAMI[n] ?? 0.01) >= 0.01 ? 2 : 3));
   let sawatteru = null;            // いま動かしているスライダー（動かしている間は上書きしない）
 
   // 調整スライダーを作る
@@ -550,8 +564,10 @@ GAMEN_HTML = """<!DOCTYPE html>
       if (s.calib_zumi && s.pp_ok && s.todoita !== null && s.todoita < s.ld - 0.03)
         chui = `ラインが ${f2(s.todoita)}m 先までしか見えておらず、先読み距離 ${f2(s.ld)}m に届いていません。` +
                "カメラをもう少し上向きにするか、先読み距離を短くしてください（届かない間は、見えている一番遠い点を狙います）";
-      else if (s.calib_zumi && s.line_mieru && !s.pp_ok)
-        chui = "ラインは見えていますが、目標点が決まりません。この状態では本番は今の方式で走ります";
+      else if (s.calib_zumi && !s.pp_ok)
+        chui = ({line_nashi: "足元にラインが見つかりません（本番は最後のハンドルを保持し、約0.3秒続くと止まります）",
+                 ten_sukunai: "ラインが足元に少し見えているだけで、向きが決められません（本番は最後のハンドルを保持します）"
+                }[s.joutai]) || "目標点が決まりません（本番は最後のハンドルを保持します）";
       $("chui").textContent = chui;
       $("chui").style.display = chui ? "block" : "none";
 

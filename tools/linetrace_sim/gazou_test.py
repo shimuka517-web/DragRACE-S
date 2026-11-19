@@ -94,14 +94,17 @@ def hashiru(trk, hoshiki, v, seed=1, sen_haba=0.03, noise=1.0, kiroku=None):
         mieru = kekka["line_mieru"]
         sa = sa_pd
         if hoshiki == "pp":
-            sen = line_algo.sen_dake_tsukuru(img, rc_race.LINE_IRO, rc_race.KURO_SHIKII, rc_race.SHIRO_SHIKII)
-            r = pp.keisan(sen, kekka["zure"], y_chikaku, accel=v)
-            if r["ok"]: sa, mieru = r["sa"], True
+            # 足元からたどる検出（rc_race.py と同じ）。見えないコマは最後のハンドルを保持し、今の方式には戻らない
+            shikii = rc_race.KURO_SHIKII if rc_race.LINE_IRO == "kuro" else rc_race.SHIRO_SHIKII
+            r = pp.keisan_gazou(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), rc_race.LINE_IRO, shikii, accel=v)
+            sa, mieru = (r["sa"], True) if r["ok"] else (sa_mae, False)
             if kiroku is not None and len(kiroku) < 400: kiroku.append((img, r, hk))
         jikan.append(time.perf_counter() - t0)
         sa_mae = sa
         lost = 0 if mieru else lost + 1
-        if lost >= rc_race.ROSUTO_KAKUTEI: return dict(ok=False, why="ライン見失い", dist=dist)
+        # 大きく切っている最中にラインが画面の横へ抜けたときは、そのまま切り続ければ戻るので少し長く待つ（rc_race.py と同じ）
+        gen = rc_race.ROSUTO_KAKUTEI_KIRI if abs(sa_mae) >= rc_race.ROSUTO_KIRI_HANTEI else rc_race.ROSUTO_KAKUTEI
+        if lost >= gen: return dict(ok=False, why="ライン見失い", dist=dist)
         cmd = sa * sim.DELTA_MAX
         rates.append((cmd - prev) * sim.CTRL_HZ); prev = cmd
         cmd_q.append(cmd); applied = cmd_q.pop(0)

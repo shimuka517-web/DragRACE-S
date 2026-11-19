@@ -126,6 +126,10 @@ ROSUTO_KAKUTEI = 10        # 「ライン無し」がこのフレーム数続い
                            #   大きくする → 一瞬の見失いで止まらないが、
                            #                コースアウト時の停止が遅れて危険
                            #   小さくする → すぐ止まるが、ちらつきで誤停止しやすい
+ROSUTO_KAKUTEI_KIRI = 20   # 足元からたどる検出で、ハンドルを大きく切っている最中にラインが画面の横へ
+ROSUTO_KIRI_HANTEI = 0.7   # 抜けたとき（直前のハンドルの大きさが この値以上）は、そのまま切り続けると
+                           # ラインが戻ってくるので、見失いで止めるまでの待ちを ROSUTO_KAKUTEI_KIRI
+                           # フレーム（約0.67秒）に延ばす。ふつうの見失いは ROSUTO_KAKUTEI のまま
 
 # ------------------------------------------------------------------------------
 # ゴールの考え方（重要）
@@ -144,6 +148,11 @@ GOAL_M_TOOI = 260     # 同・上限。20cm≒165px が中央に来る窓
                       #   遠すぎる（コース外の）黒を除外
 GOAL_KAKUTEI = 2      # 左右同時MARKが連続このフレーム数でゴール確定
                       #   大きくする → 誤判定は減るが、高速通過で見逃すリスク
+GOAL_KENCHI = False   # ★ 横線（ゴールマーカー）を見つけて止まる仕組みのON/OFF
+                      #   False → 横線では止まらない。MARK も画面に出さない（2026-11-19 から）。
+                      #           白線のコースでは、床の白い部分をマークと見間違えやすかったため。
+                      #           止まるのは STOP ボタン・ラインロスト・時間切れ・通信断のとき
+                      #   True  → 授業のドラッグレースと同じ（左右の MARK でゴール）
 
 # ------------------------------------------------------------------------------
 # 計測サーバとの連携（レーン登録・モニタへの映像・タイム通知。無くても走行に影響しない）
@@ -361,6 +370,27 @@ PP_HASHI = 0.75       # 近くの帯のラインが画面の端に寄ってい�
                       # ハンドルを戻してしまうため（2026-11-18 の走行。docs/PP_COURSEOUT_20261118.md）
 PP_GATE = 0.25        # 点群をたどるとき「ラインの続き」とみなす距離[m]
                       #   大きくする → 急な角も追えるが、近くの別の物に飛び移りやすい
+
+# --- 足元からたどる検出（LINE_ALGO="pp" のとき。2026-11-19 の仕様変更） ---
+# 画面の「近くの帯・遠くの帯」には頼らない。映像を真上から見た図に直し、
+#   ① 周りの床より明るい（黒線なら暗い）所だけ残す   … PP_SA と SHIRO_SHIKII / KURO_SHIKII
+#   ② 幅が PP_HABA_MIN〜PP_HABA_MAX の細長いものだけ残す … 細かいゴミ・床の反射を消す
+#   ③ 車の足元につながっている塊だけを「ライン」にする … 離れた明るい所は候補にならない
+# SHIRO_SHIKII / KURO_SHIKII（明るさのしきい値）は今までどおり kyotsu_settei.json。
+# 調整は pp_test.py の画面のスライダーでできる（モーターは動かない）
+PP_SA = 30            # ★ 周りの床より、これ以上明るい（黒線なら暗い）所だけをラインとみなす（0〜255）
+                      #   大きくする → 床の明るいムラ・反射に強いが、かすれたラインを見失う
+                      #   小さくする → かすれたラインも拾うが、床の反射を拾いやすい
+PP_HABA_MIN = 0.020   # ライン幅の下限[m]。これより細いものはノイズとして消す
+PP_HABA_MAX = 0.075   # ライン幅の上限[m]。これより太い塊（床の反射など）は消す
+                      #   今のラインは幅 30〜50mm。ラインの幅を変えたら、この2つを合わせること
+PP_GATE_Y = 0.30      # 前のコマのラインの位置から、左右にこの範囲[m]の中だけでラインを探す
+                      #   大きくする → 大きくずれてもラインを見つけ直せるが、横の別の物に飛びやすい
+PP_LD_CURVE = 0.6     # ★ カーブがきついほど先読み距離を縮める強さ。0＝縮めない
+                      #   先読み距離 = PP_LD_KIHON ÷ (1 + この値 × カーブのきつさ[1/m])
+                      #   例: 0.6 のとき、半径 1m のカーブでは 0.65m → 約 0.41m（画面に映る一番手前まで）
+                      #   大きくする → カーブで足元寄りを狙い、曲がり込みが強くなる（ふらつきやすい）
+                      #   小さくする → 遠くを見たまま走る（カーブでふくらみやすい）
 PP_HENKAN = None      # 画素 ⇔ 床の位置 の変換（pp_test.py のキャリブレーションで保存される）
 PP_HENKAN_SIZE = None # その変換を作ったときの画像の大きさ
 PP_SHIKAKU = None     # キャリブレーションに使った四角形の寸法（pp_test.py が表示に使う）
@@ -693,11 +723,22 @@ def nou_de_handan(app, kekka, ima):
         # そのコマは今の方式（端なら大きく切る／見失ったら最後のハンドルを保持）で走る
         pp = kekka.get("pp")
         app.steer_pp = None
-        hashi = kekka["zure"] is not None and abs(kekka["zure"]) > PP_HASHI * CAM_WIDTH / 2
-        if pp and pp.get("ok") and kekka["line_mieru"] and not hashi:
+        # ★ LINE_ALGO="pp" で、キャリブレーション済み（足元からたどる検出が使える）とき:
+        #   画面の帯は使わず、ピュアパシュート1本で走る。ラインが見えないコマは
+        #   今の方式には戻さず、最後のハンドルを保持する（床のノイズに飛びつかない）
+        pp_dake = LINE_ALGO == "pp" and app.pp is not None and app.pp.tsukaeru
+        pp_ok = bool(pp and pp.get("ok"))
+        app.mieteru = pp_ok if pp_dake else bool(kekka["line_mieru"])   # ラインが見えているか（停止の判定・記録用）
+        if pp_ok:
             app.steer_pp = pp["sa"] * KIREKAKU_HABA * (-1 if HANDORU_GYAKU else 1)
-        app.pp_chu = LINE_ALGO == "pp" and app.steer_pp is not None
-        app.steer_sa = app.steer_pp if app.pp_chu else app.steer_pd
+        if pp_dake:
+            app.pp_chu = pp_ok
+            app.hoji = not pp_ok
+            app.steer_sa = app.steer_pp if pp_ok else app.steer_sa
+        else:
+            # 今の方式（LINE_ALGO="pd"、または未キャリブレーション）
+            app.pp_chu = False
+            app.steer_sa = app.steer_pd
 
         # --- アクセル: 発進プロファイル（発進%からランプで踏み増す） ---
         kihon = min(ACCEL_SAIDAI, ACCEL_HASSHIN + ACCEL_RAMPU * keika)
@@ -725,7 +766,7 @@ def nou_de_handan(app, kekka, ima):
         # 最初に見えたフレームの時刻を控え、連続で確定したらその時刻をタイムに
         # する（確定待ちの遅れを補正）
         marker_ryou = False
-        if kekka["zure"] is not None:
+        if GOAL_KENCHI and kekka["zure"] is not None:
             hidari = migi = False
             for m in kekka.get("marks", []):
                 sa = m - kekka["zure"]              # ラインから見たMARKの位置
@@ -742,9 +783,9 @@ def nou_de_handan(app, kekka, ima):
         else:
             app.goal_kaisu = 0
 
-        # ライン切断はバックアップ停止（マーカー見逃し・コースアウト時）
-        # （ピュアパシュートも近くの帯にラインがあるときだけ使うので、判定は共通）
-        if not kekka["line_mieru"]:
+        # ライン切断は停止の判定（コースアウト時）。
+        # 足元からたどる検出（pp_dake）のときは、その検出でラインが見えているかで決める
+        if not app.mieteru:
             if app.rosuto_kaisu == 0:
                 app.rosuto_hajime = keika
             app.rosuto_kaisu += 1
@@ -754,7 +795,8 @@ def nou_de_handan(app, kekka, ima):
         riyu = None
         if app.goal_kaisu >= GOAL_KAKUTEI:
             riyu = "goal"                          # ゴールマーカー検出
-        elif app.rosuto_kaisu >= ROSUTO_KAKUTEI:
+        elif app.rosuto_kaisu >= (ROSUTO_KAKUTEI_KIRI if pp_dake and abs(app.steer_sa) >= ROSUTO_KIRI_HANTEI
+                                  else ROSUTO_KAKUTEI):
             riyu = "line_lost"                     # バックアップ停止
         elif keika >= min(SAIDAI_SOKO_BYO, SOKO_BYO_JOGEN):
             riyu = "timeout"
@@ -1022,9 +1064,11 @@ class Kamera:
             self.picam2.stop()
 
 
-def gamen_ni_kaku(gazou, kekka, state, ato=None):
+def gamen_ni_kaku(gazou, kekka, state, ato=None, obi_miseru=True):
     """検出結果を映像に描き込む（ブラウザで見る映像を作る）
-       ato: 追跡中のライン位置[px]（ゲート枠の中心。None=中央から探索中）"""
+       ato: 追跡中のライン位置[px]（ゲート枠の中心。None=中央から探索中）
+       obi_miseru: 今の方式の「近くの帯・遠くの帯」と印を描くか。
+                   足元からたどる検出で走っているときは False（帯は使わないため）"""
     img = gazou.copy()
     takasa, haba = img.shape[:2]
     chuo = haba // 2
@@ -1037,8 +1081,12 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
         cv2.rectangle(img, (0, y0), (haba, y1), iro, 1)
         return (y0 + y1) // 2
 
-    y_chikaku = obi(ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, (255, 128, 0))
-    y_tooku = obi(ROI_TOOKU_UE, ROI_TOOKU_SHITA, (255, 220, 0))
+    if obi_miseru:
+        y_chikaku = obi(ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, (255, 128, 0))
+        y_tooku = obi(ROI_TOOKU_UE, ROI_TOOKU_SHITA, (255, 220, 0))
+    else:
+        y_chikaku = int(takasa * (ROI_CHIKAKU_UE + ROI_CHIKAKU_SHITA) / 2)
+        y_tooku = int(takasa * (ROI_TOOKU_UE + ROI_TOOKU_SHITA) / 2)
 
     # 追従ゲート（ラインの続きを探す枠）を黄色で描く
     def gate_waku(ue, shita, g_haba):
@@ -1050,11 +1098,12 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
         cv2.line(img, (g_chuo, y0 + 2), (g_chuo, y0 + 12), (0, 255, 255), 2)
 
     gate_chikaku = TSUIZUI_GATE if ato is not None else HAJIME_GATE
-    gate_waku(ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, gate_chikaku)
+    if obi_miseru:
+        gate_waku(ROI_CHIKAKU_UE, ROI_CHIKAKU_SHITA, gate_chikaku)
     # （遠くの帯には枠が無い。遠くの点は、近くの帯のラインからたどって決めるため）
 
     # たどったライン（つづく線）を小さな黄色の点で描く
-    for tx, ty in kekka.get("tadori", []):
+    for tx, ty in (kekka.get("tadori", []) if obi_miseru else []):
         cv2.circle(img, (tx, ty), 2, (0, 255, 255), -1)
     if kekka.get("tooku_y") is not None:
         y_tooku = int(kekka["tooku_y"])     # 遠くの点は、実際にたどり着いた高さに描く
@@ -1068,20 +1117,22 @@ def gamen_ni_kaku(gazou, kekka, state, ato=None):
     cv2.line(img, (jx - 20, jy), (jx + 20, jy), (0, 255, 0), 2)
     cv2.line(img, (jx, jy - 20), (jx, jy + 20), (0, 255, 0), 2)
 
-    for m in kekka.get("marks", []):
-        cv2.circle(img, (int(chuo + m), y_chikaku), 8, (255, 0, 255), 2)
-        cv2.putText(img, "MARK", (int(chuo + m) - 22, y_chikaku - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1, cv2.LINE_AA)
-    if kekka["zure"] is not None:
-        cv2.circle(img, (int(chuo + kekka["zure"]), y_chikaku), 8, (0, 128, 255), -1)
-    if kekka["zure_tooku"] is not None:
-        cv2.circle(img, (int(chuo + kekka["zure_tooku"]), y_tooku), 8, (0, 200, 255), -1)
-    if kekka["zure"] is not None and kekka["zure_tooku"] is not None:
-        cv2.line(img, (int(chuo + kekka["zure"]), y_chikaku),
-                 (int(chuo + kekka["zure_tooku"]), y_tooku), (0, 128, 255), 2)
+    if obi_miseru:
+        if GOAL_KENCHI:
+            for m in kekka.get("marks", []):
+                cv2.circle(img, (int(chuo + m), y_chikaku), 8, (255, 0, 255), 2)
+                cv2.putText(img, "MARK", (int(chuo + m) - 22, y_chikaku - 14),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1, cv2.LINE_AA)
+        if kekka["zure"] is not None:
+            cv2.circle(img, (int(chuo + kekka["zure"]), y_chikaku), 8, (0, 128, 255), -1)
+        if kekka["zure_tooku"] is not None:
+            cv2.circle(img, (int(chuo + kekka["zure_tooku"]), y_tooku), 8, (0, 200, 255), -1)
+        if kekka["zure"] is not None and kekka["zure_tooku"] is not None:
+            cv2.line(img, (int(chuo + kekka["zure"]), y_chikaku),
+                     (int(chuo + kekka["zure_tooku"]), y_tooku), (0, 128, 255), 2)
 
     # 狙い（先読みを混ぜた、ハンドルを決める位置）を白い縦線で描く
-    if SAKIYOMI > 0 and kekka.get("nerai") is not None:
+    if obi_miseru and SAKIYOMI > 0 and kekka.get("nerai") is not None:
         nx = int(chuo + kekka["nerai"])
         cv2.line(img, (nx, y_chikaku - 16), (nx, y_chikaku + 16), (255, 255, 255), 2)
 
@@ -1236,7 +1287,8 @@ class RaceApp:
         self.steer_pd = 0.0          # 今の方式で計算したハンドル[%]
         self.steer_pp = None         # ピュアパシュートで計算したハンドル[%]（計算できないコマは None）
         self.pp_chu = False          # いまピュアパシュートのハンドルで走っているか
-        self.hoji = False            # 今の方式がハンドルを直前の値のまま保持したか（記録用）
+        self.hoji = False            # ハンドルを直前の値のまま保持したか（記録用）
+        self.mieteru = False         # ラインが見えているか（足元からたどる検出 or 今の方式）
         self.pp = None               # ピュアパシュートの計算係（line_algo.py）
         if line_algo is not None:
             self.pp = line_algo.PurePursuit(line_algo.settei_toridasu(globals()))
@@ -1334,7 +1386,7 @@ class RaceApp:
                             "狙い[px]", "アクセル減[%]",
                             "方式", "今の方式のハンドル[%]", "PPのハンドル[%]",
                             "PP目標の前[m]", "PP目標の左[m]", "PP先読み[m]", "PP点の数",
-                            "ラインの広がり", "ハンドル保持"])
+                            "ラインの広がり", "ハンドル保持", "PP状態"])
         # --- 設定スナップショット(この走りがどんなセッティングだったかの記録) ---
         snap = {
             "nichiji": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1362,7 +1414,9 @@ class RaceApp:
             "PP_LD_SAISHO": PP_LD_SAISHO, "PP_SOKUDO_KEISU": PP_SOKUDO_KEISU,
             "KIREKAKU_DO": KIREKAKU_DO, "WHEELBASE": WHEELBASE,
             "PP_CURVE_GEN": PP_CURVE_GEN, "PP_CURVE_SAITEI": PP_CURVE_SAITEI, "PP_GATE": PP_GATE,
-            "PP_HASHI": PP_HASHI,
+            "PP_HASHI": PP_HASHI, "PP_SA": PP_SA, "PP_HABA_MIN": PP_HABA_MIN,
+            "PP_HABA_MAX": PP_HABA_MAX, "PP_GATE_Y": PP_GATE_Y, "PP_LD_CURVE": PP_LD_CURVE,
+            "GOAL_KENCHI": GOAL_KENCHI,
             "PP_CALIB_ZUMI": bool(self.pp is not None and self.pp.tsukaeru),
         }
         with open(self._kiroku_base + "_settei.json", "w") as f:
@@ -1372,8 +1426,8 @@ class RaceApp:
     def kiroku_tsuika(self, keika, kekka):
         if self._csv:
             self._csv.writerow([f"{keika:.3f}", kekka["zure"], kekka["zure_tooku"],
-                                kekka["katamuki"], int(kekka["line_mieru"]),
-                                len(kekka.get("marks", [])),
+                                kekka["katamuki"], int(self.mieteru),
+                                len(kekka.get("marks", [])) if GOAL_KENCHI else 0,
                                 f"{self.steer_sa:+.2f}", f"{self.accel:.1f}",
                                 kekka.get("nerai"), f"{self.accel_gen:.1f}",
                                 "pp" if self.pp_chu else "pd", f"{self.steer_pd:+.2f}",
@@ -1387,7 +1441,7 @@ class RaceApp:
         return [m[0], m[1], "" if pp.get("ld") is None else pp["ld"], len(pp.get("ten") or [])]
 
     def _hoka_kiroku(self, kekka):
-        return [kekka.get("hirogari"), int(self.hoji)]
+        return [kekka.get("hirogari"), int(self.hoji), (kekka.get("pp") or {}).get("joutai", "")]
 
     def kiroku_shuryo(self):
         if self._csv_file:
@@ -1408,9 +1462,10 @@ class RaceApp:
             # --- ピュアパシュートの計算（キャリブレーション済みのときだけ） ---
             pp_keisan = self.pp is not None and self.pp.tsukaeru and (LINE_ALGO == "pp" or PP_MIRUDAKE)
             if pp_keisan:
-                sen_dake = line_algo.sen_dake_tsukuru(gazou, LINE_IRO, KURO_SHIKII, SHIRO_SHIKII)
-                y_chikaku = gazou.shape[0] * (ROI_CHIKAKU_UE + ROI_CHIKAKU_SHITA) / 2
-                kekka["pp"] = self.pp.keisan(sen_dake, kekka["zure"], y_chikaku, self.accel)
+                # 足元からたどる検出（画面の帯は使わない）。しきい値は PP_SA と一緒に pp_test.py で調整
+                shikii = KURO_SHIKII if LINE_IRO == "kuro" else SHIRO_SHIKII
+                kekka["pp"] = self.pp.keisan_gazou(cv2.cvtColor(gazou, cv2.COLOR_BGR2GRAY),
+                                                   LINE_IRO, shikii, self.accel)
 
             ima = time.time()
             dt = ima - mae_jikoku
@@ -1429,7 +1484,8 @@ class RaceApp:
                 self.kekka = kekka
                 state = self.state
 
-            e = gamen_ni_kaku(gazou, kekka, state, ato)
+            pp_dake = LINE_ALGO == "pp" and self.pp is not None and self.pp.tsukaeru
+            e = gamen_ni_kaku(gazou, kekka, state, ato, obi_miseru=not pp_dake)
             if pp_keisan:        # 点群・先読みの円・目標点を描き足す（使っていないときは薄い色）
                 line_algo.gamen_ni_kaku(e, self.pp.henkan, kekka["pp"], LINE_ALGO == "pp")
             h2 = int(e.shape[0] * HAISHIN_HABA / e.shape[1])
@@ -1477,9 +1533,11 @@ class RaceApp:
                 "state": self.state,
                 "zure": self.kekka.get("zure"),
                 "katamuki": self.kekka.get("katamuki"),
-                "line_mieru": bool(self.kekka.get("line_mieru")),
+                "line_mieru": bool((self.kekka.get("pp") or {}).get("ok")
+                                   if (LINE_ALGO == "pp" and self.pp is not None and self.pp.tsukaeru)
+                                   else self.kekka.get("line_mieru")),
                 "midori": bool(self.kekka.get("midori")),
-                "marks": len(self.kekka.get("marks", [])),
+                "marks": len(self.kekka.get("marks", [])) if GOAL_KENCHI else 0,
                 "goal_mieru": bool(self.marker_mieru),
                 "accel": round(self.accel),
                 "steer": round(self.steer_sa, 2),

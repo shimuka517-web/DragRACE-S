@@ -44,6 +44,12 @@ SHOKICHI = {
     "PP_SOKUDO_KEISU": 0.0, "KIREKAKU_DO": 25.0, "WHEELBASE": 0.257,
     "PP_CURVE_GEN": 0.0, "PP_CURVE_SAITEI": 0.5,
     "PP_GATE": 0.25,
+    # --- 足元からたどる検出（Kenshutsu）の設定 ---
+    "PP_SA": 30,              # 周りの床より、これ以上明るい（黒線なら暗い）所だけをラインとみなす（0〜255）
+    "PP_HABA_MIN": 0.020,     # ラインの幅の下限[m]。これより細いものはノイズとして消す
+    "PP_HABA_MAX": 0.075,     # ラインの幅の上限[m]。これより太い塊（床の反射など）は消す
+    "PP_GATE_Y": 0.30,        # 前のコマのラインの位置から、左右にこの範囲[m]の中だけでラインを探す
+    "PP_LD_CURVE": 0.6,       # カーブがきついほど先読み距離を縮める強さ（0＝縮めない）
     "PP_HENKAN": None, "PP_HENKAN_SIZE": None,
 }
 
@@ -287,23 +293,186 @@ class Tengun:
 
 
 # ==============================================================================
+# 部品2'（新）: 足元からたどる検出（Kenshutsu）
+#
+#   画面の「帯」には頼らず、次の順でラインだけを取り出す。
+#     1. 映像を「真上から見た図」に直す（床の上の寸法で、ものの幅を測れるようにする）
+#     2. 周りの床より明るい（黒線なら暗い）所だけを残す（床の明るさが変わっても効く）
+#     3. 幅が PP_HABA_MIN〜PP_HABA_MAX の細長いものだけを残す
+#        （細かいゴミ・床の反射のような太い塊を消す）
+#     4. つながった塊ごとに分け、車の足元（前のコマのラインの位置）に届いている塊を
+#        「ライン」として1つだけ選ぶ → つながっていない明るい所は、そもそも候補にならない
+#     5. 選んだ塊の中だけを、同心円で奥へたどって点の列にする（Tengun と同じ）
+# ==============================================================================
+
+class Kenshutsu:
+    BAISOKU = 150.0           # 真上から見た図の細かさ[画素/m]（1画素＝約6.7mm）
+    Y_HAN = 0.80              # 左右に何mまで見るか
+    X_OKU = 1.60              # 前に何mまで見るか
+    SHOSA = 0.5               # 先に画像を何倍に縮めるか（軽くするため）
+    SEED_OKU = 0.60           # 足元とみなす範囲: 画面に映る一番手前から、前にこの距離[m]まで
+    MIN_MENSEKI = 60          # 小さすぎる塊は無視[画素]（150画素/m で約 2.7cm 角）
+    MIN_SEED = 12             # 足元の範囲の中に、塊がこの画素数以上入っていること
+
+    def __init__(self, henkan, p):
+        self.henkan = henkan
+        self.p = p
+        chikai, _ = henkan.mieru_kyori()
+        self.x_lo = max(0.0, chikai - 0.02)
+        b = self.BAISOKU
+        self.W = int(round(2 * self.Y_HAN * b))
+        self.Hh = int(round((self.X_OKU - self.x_lo) * b))
+        self.w_s = max(2, int(round(henkan.size[0] * self.SHOSA)))
+        self.h_s = max(2, int(round(henkan.size[1] * self.SHOSA)))
+        S = np.diag([self.w_s / henkan.size[0], self.h_s / henkan.size[1], 1.0])
+        A = np.array([[0.0, -b, self.Y_HAN * b],
+                      [-b, 0.0, self.X_OKU * b],
+                      [0.0, 0.0, 1.0]])
+        self.M = A @ henkan.H @ np.linalg.inv(S)          # 縮めた画像の画素 → 真上から見た図の画素
+        self.valid = cv2.erode(cv2.warpPerspective(np.full((self.h_s, self.w_s), 255, np.uint8),
+                                                   self.M, (self.W, self.Hh), flags=cv2.INTER_NEAREST),
+                               np.ones((5, 5), np.uint8)) > 0
+        self.settei_kaeru(p)
+        self.mask = None          # 掃除したあとの、ラインらしいもの全部
+        self.sentaku = None       # そのうち、ラインとして選んだ塊
+        self.sentaku_zumi = False
+
+    def settei_kaeru(self, p):
+        self.p = p
+        b = self.BAISOKU
+        ku = lambda m: max(3, int(round(m * b)) | 1)       # m → 奇数の画素数
+        self.k_tophat = np.ones((ku(2.5 * float(p["PP_HABA_MAX"])),) * 2, np.uint8)
+        self.k_blob = np.ones((ku(1.5 * float(p["PP_HABA_MAX"])),) * 2, np.uint8)
+        self.k_blob_hiroge = np.ones((5, 5), np.uint8)
+
+    def yuka_kara_px(self, x, y):
+        """床の位置[m] → 真上から見た図の (列, 行)"""
+        return ((self.Y_HAN - y) * self.BAISOKU, (self.X_OKU - x) * self.BAISOKU)
+
+    def shori(self, gray, line_iro, shikii):
+        """グレー画像 → 「ラインらしい所」だけ白(255)にした、真上から見た図"""
+        h, w = gray.shape[:2]
+        if (w, h) != tuple(self.henkan.size):
+            gray = cv2.resize(gray, tuple(self.henkan.size), interpolation=cv2.INTER_AREA)
+        small = cv2.resize(gray, (self.w_s, self.h_s), interpolation=cv2.INTER_AREA)
+        if line_iro == "kuro":
+            small = 255 - small                 # 黒線は、明暗を逆にして「明るい線」として扱う
+            kijun = 255 - int(shikii)
+        else:
+            kijun = int(shikii)
+        b = cv2.warpPerspective(small, self.M, (self.W, self.Hh), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # 周りの床より明るい所だけ（細いものだけ残す top-hat 変換）
+        th = cv2.morphologyEx(b, cv2.MORPH_TOPHAT, self.k_tophat)
+        m = ((b >= kijun) & (th >= int(self.p["PP_SA"])) & self.valid).astype(np.uint8) * 255
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))      # 細かいゴミ
+        # 太すぎる塊（床の反射など）を消す
+        ookii = cv2.morphologyEx(m, cv2.MORPH_OPEN, self.k_blob)
+        if ookii.any():
+            ookii = cv2.dilate(ookii, self.k_blob_hiroge)
+            m[ookii > 0] = 0
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))     # 小さな途切れをつなぐ
+        self.mask = m
+        return m
+
+    def erabu(self, mask, y_chuo, y_han):
+        """足元に届いている塊のうち、前のコマのラインの位置(y_chuo)に一番近いものを1つ選ぶ。
+           返り値: (その塊だけの図, 探し始めの床の位置(x, y)) / 見つからなければ (None, None)"""
+        n, lab, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        self.sentaku = None
+        if n <= 1:
+            return None, None
+        b = self.BAISOKU
+        r1 = self.Hh
+        r0 = max(0, int(round((self.X_OKU - (self.x_lo + self.SEED_OKU)) * b)))
+        c0 = max(0, int(round((self.Y_HAN - (y_chuo + y_han)) * b)))
+        c1 = min(self.W, int(round((self.Y_HAN - (y_chuo - y_han)) * b)))
+        if c1 - c0 < 2 or r1 - r0 < 2:
+            return None, None
+        win = lab[r0:r1, c0:c1]
+        erabi = None
+        for i in np.unique(win[win > 0]):
+            if st[i, cv2.CC_STAT_AREA] < self.MIN_MENSEKI:
+                continue
+            gyo, retsu = np.nonzero(win == i)
+            if len(gyo) < self.MIN_SEED:
+                continue
+            y_hei = self.Y_HAN - (retsu.mean() + c0) / b
+            sa = abs(y_hei - y_chuo)
+            if erabi is None or sa < erabi[0]:
+                erabi = (sa, i, gyo, retsu)
+        if erabi is None:
+            return None, None
+        _, i, gyo, retsu = erabi
+        chikai = gyo >= gyo.max() - 4                    # 一番手前の数行
+        col = retsu[chikai].mean() + c0
+        row = gyo[chikai].mean() + r0
+        tane = (self.X_OKU - row / b, self.Y_HAN - col / b)
+        self.sentaku = (lab == i).astype(np.uint8) * 255
+        return self.sentaku, tane
+
+    def gazou_ni_modosu(self, size, sentaku_nomi=False):
+        """掃除したあとの図を、カメラ映像の位置に戻した画像（確認用）。
+           ラインとして選んだ塊=255、ほかのラインらしい所=90、それ以外=0"""
+        if self.mask is None:
+            return np.zeros((size[1], size[0]), np.uint8)
+        e = np.zeros((self.h_s, self.w_s), np.uint8)
+        flags = cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP
+        if not sentaku_nomi:
+            e = cv2.warpPerspective(self.mask, self.M, (self.w_s, self.h_s), flags=flags)
+            e = (e > 0).astype(np.uint8) * 90
+        if self.sentaku is not None:
+            s = cv2.warpPerspective(self.sentaku, self.M, (self.w_s, self.h_s), flags=flags)
+            e[s > 0] = 255
+        return cv2.resize(e, tuple(size), interpolation=cv2.INTER_NEAREST)
+
+
+class TengunTori(Tengun):
+    """Tengun と同じ「同心円でたどる」やり方で、真上から見た図の上を探す"""
+
+    def __init__(self, ken, gate=0.25):
+        self.gate = gate
+        r = np.arange(self.R_SAISHO, self.R_SAIDAI + 1e-9, self.R_KIZAMI)
+        kaku = np.radians(np.arange(-self.KAKU_SAIDAI, self.KAKU_SAIDAI + 1e-9, self.KAKU_KIZAMI))
+        xx = r[:, None] * np.cos(kaku)[None, :]
+        yy = r[:, None] * np.sin(kaku)[None, :]
+        col, row = ken.yuka_kara_px(xx, yy)
+        ix = np.round(col).astype(np.int64)
+        iy = np.round(row).astype(np.int64)
+        naka = (xx >= ken.x_lo) & (ix >= 0) & (ix < ken.W) & (iy >= 0) & (iy < ken.Hh)
+        tsukau = naka.sum(axis=1) >= 6
+        self.r = r[tsukau]
+        self.kaku = kaku
+        self.naka = naka[tsukau]
+        self.ix = np.where(naka, ix, 0)[tsukau]
+        self.iy = np.where(naka, iy, 0)[tsukau]
+        self.d_kaku = math.radians(self.KAKU_KIZAMI)
+
+
+# ==============================================================================
 # 部品3: ピュアパシュート
 # ==============================================================================
 
 class PurePursuit:
     def __init__(self, p):
         """p: 設定の辞書（settei_toridasu で作る）"""
-        self.settei_kaeru(p)
         self.mae_tane = None      # 前のコマで見つけた一番手前の点（探し始めの位置の予備）
         self.mae_tane_kazu = 99
+        self.y_ato = None         # 新しい検出: 前のコマで見つけたラインの足元の位置（左+）[m]
+        self.miushinai = 99       # 新しい検出: ラインが見つからなかったコマの連続数
+        self.settei_kaeru(p)
 
     def settei_kaeru(self, p):
         self.p = dict(SHOKICHI)
         self.p.update({k: v for k, v in p.items() if k in SHOKICHI})
         self.henkan = henkan_yomu(self.p)
         self.tengun = None
+        self.ken = None
+        self.tengun_tori = None
         if self.henkan is not None:
             self.tengun = Tengun(self.henkan, float(self.p["PP_GATE"]))
+            self.ken = Kenshutsu(self.henkan, self.p)
+            self.tengun_tori = TengunTori(self.ken, float(self.p["PP_GATE"]))
 
     @property
     def tsukaeru(self):
@@ -388,6 +557,91 @@ class PurePursuit:
                 saidai_k = max(saidai_k, abs(2.0 * t[j, 1] / (r[j] ** 2)))
             kekka["gen"] = round(max(float(self.p["PP_CURVE_SAITEI"]), min(1.0, 1.0 - gen_gain * saidai_k)), 3)
         kekka["ok"] = True
+        return kekka
+
+    # --------------------------------------------------------------------------
+    # 新しい検出（足元からたどる）で 1コマぶんを計算する。rc_race.py と pp_test.py はこちらを使う
+    # --------------------------------------------------------------------------
+    def _mokuhyo(self, t, r, ld):
+        """点の列 t（床の位置）と、車軸からの距離 r から、半径 ld の円と交わる所を目標点にする"""
+        k = int(np.argmin(np.abs(r - ld))) if r[-1] >= ld else len(r) - 1
+        k0, k1 = max(0, k - 1), min(len(r), k + 2)
+        return float(t[k0:k1, 0].mean()), float(t[k0:k1, 1].mean())
+
+    def keisan_gazou(self, gray, line_iro, shikii, accel=0.0):
+        """gray: グレー画像。line_iro: "shiro"/"kuro"。shikii: その色用のしきい値。
+           返り値の辞書は keisan() と同じ（ok / sa / kakudo / gen / ten / mokuhyo / ld / todoita /
+           kyokuritsu）に、次を足したもの:
+             joutai : "ok" / "line_nashi"（足元にラインが無い）/ "ten_sukunai" / "keisan_fuka"
+             tane   : 探し始めの床の位置 (x, y)
+             ld0    : カーブで縮める前の先読み距離"""
+        kekka = {"ok": False, "sa": 0.0, "kakudo": 0.0, "gen": 1.0, "ten": [], "mokuhyo": None,
+                 "ld": None, "todoita": None, "kyokuritsu": None, "sokudo": 0.0,
+                 "joutai": "keisan_fuka", "tane": None, "ld0": None}
+        if self.ken is None or self.tengun_tori is None:
+            return kekka
+        ld0, sokudo = self.sakiyomi_kyori(accel)
+        kekka["ld0"], kekka["sokudo"] = round(ld0, 3), round(sokudo, 2)
+        kekka["ld"] = kekka["ld0"]
+
+        # --- 1〜3: 真上から見た図にして、ラインらしい所だけ残す ---
+        mask = self.ken.shori(gray, line_iro, shikii)
+
+        # --- 4: 足元に届いている塊を、ラインとして1つ選ぶ ---
+        # 前のコマで見つけたラインの位置の近くだけ探す（急に別の所へ飛ばない）。
+        # 長く見失ったら、車の正面から探し直す（置き直しに追従）
+        if self.miushinai > 15:
+            self.y_ato = None
+        y_chuo = 0.0 if self.y_ato is None else self.y_ato
+        y_han = float(self.p["PP_GATE_Y"])
+        sentaku, tane = self.ken.erabu(mask, y_chuo, y_han)
+        if tane is None:
+            self.miushinai += 1
+            kekka["joutai"] = "line_nashi"
+            return kekka
+        self.miushinai = 0
+        self.y_ato = tane[1]
+        kekka["tane"] = (round(tane[0], 3), round(tane[1], 3))
+
+        # --- 5: 選んだ塊の中だけをたどる ---
+        ten = self.tengun_tori.sagasu(sentaku, tane)
+        kekka["ten"] = [(round(x, 3), round(y, 3)) for x, y in ten]
+        if len(ten) < 2:
+            kekka["joutai"] = "ten_sukunai"
+            return kekka
+        t = np.array(ten)
+        r = np.hypot(t[:, 0], t[:, 1])
+        kekka["todoita"] = round(float(r[-1]), 3)
+        if r[-1] - r[0] < 0.08:
+            kekka["joutai"] = "ten_sukunai"       # 足元に少し見えているだけ → 向きが決められない
+            return kekka
+
+        # --- 先読み距離: カーブがきついほど縮める ---
+        mx, my = self._mokuhyo(t, r, ld0)
+        kyoku0 = abs(2.0 * my / (mx * mx + my * my))
+        ld = ld0 / (1.0 + float(self.p["PP_LD_CURVE"]) * kyoku0)
+        ld = max(float(self.p["PP_LD_SAISHO"]), ld, float(r[0]))     # 画面に映る一番手前より近くは見えない
+        kekka["ld"] = round(ld, 3)
+        mx, my = self._mokuhyo(t, r, ld)
+        kekka["mokuhyo"] = (round(mx, 3), round(my, 3))
+
+        # --- ピュアパシュートの式 ---
+        kyoku = 2.0 * my / (mx * mx + my * my)
+        kaku = math.degrees(math.atan(float(self.p["WHEELBASE"]) * kyoku))
+        saidai = max(1.0, float(self.p["KIREKAKU_DO"]))
+        kekka["kakudo"] = round(kaku, 2)
+        kekka["sa"] = max(-1.0, min(1.0, kaku / saidai))
+        kekka["kyokuritsu"] = round(kyoku, 3)
+
+        gen_gain = float(self.p["PP_CURVE_GEN"])
+        if gen_gain > 0:
+            saidai_k = abs(kyoku)
+            for rr in (0.6, 0.85, 1.1):
+                j = int(np.argmax(r >= rr)) if r[-1] >= rr else len(r) - 1
+                saidai_k = max(saidai_k, abs(2.0 * t[j, 1] / (r[j] ** 2)))
+            kekka["gen"] = round(max(float(self.p["PP_CURVE_SAITEI"]), min(1.0, 1.0 - gen_gain * saidai_k)), 3)
+        kekka["ok"] = True
+        kekka["joutai"] = "ok"
         return kekka
 
 
